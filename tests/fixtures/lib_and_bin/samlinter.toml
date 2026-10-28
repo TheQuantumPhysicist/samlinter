@@ -1,0 +1,2 @@
+forbidden-words = []
+subscriber-crates = ["tracing-subscriber"]

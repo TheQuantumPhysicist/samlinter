@@ -1,0 +1,3 @@
+forbidden-words = ["NOTES.md"]
+subscriber-crates = ["tracing-subscriber"]
+# Read NOTES.md first.

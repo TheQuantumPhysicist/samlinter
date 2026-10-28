@@ -1,0 +1,17 @@
+[package]
+name = "lib"
+version = "0.1.0"
+edition = "2024"
+
+[package.metadata.samlinter.expect.member_version]
+serde = "fixture: serde has no version here, so this exemption is unfulfilled"
+
+[features]
+fast = []
+
+[dependencies]
+serde = { workspace = true }
+logs = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+tracing-subscriber = { workspace = true }

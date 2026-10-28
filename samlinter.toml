@@ -1,0 +1,18 @@
+# - Workspace facts samlinter cannot derive from `cargo metadata`.
+# - Every key is required; unknown keys are an error, so a typo cannot silently skip a check.
+# - No rule switches, path excludes or severities: every finding fails the run.
+# - Exemptions live at the violation, never here:
+#   - Rust: #[cfg_attr(samlinter, expect(<rule>, reason = "<why>"))]
+#   - Cargo.toml: [package.metadata.samlinter.expect.<rule>] with <dependency> = "<why>"
+
+# - Words or phrases banned in comments (Rust, Cargo.toml, this file) and README files.
+# - Case-sensitive, whole words only: "NOTES" does not match "KEYNOTES".
+# - The words of a phrase match across any whitespace run, so a phrase wrapped across
+#   lines or consecutive comment lines still matches.
+forbidden-words = ["RULES.md", "CODEMAP.md", "HANDOFF.md", "TRACKS.md", "CLAUDE.md", "AI", "LLM"]
+
+# - Crates that install a log subscriber.
+# - Libraries only emit logs: a package without a binary target may list these only as
+#   dev or build dependencies.
+# - `-` and `_` in a name match each other, as on crates.io.
+subscriber-crates = ["tracing-subscriber"]

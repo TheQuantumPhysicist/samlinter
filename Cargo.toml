@@ -1,0 +1,51 @@
+[package]
+name = "samlinter"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+# - TODO: add `repository`, the source link crates.io shows on the crate page.
+# - Postponed: the project has no public repository URL yet.
+# - Plan: set it to that URL when the repository is published.
+description = "Syntax gate for Rust code rules clippy cannot express: rest patterns, restricted visibility, item layout, comment text, Cargo.toml conventions"
+readme = "README.md"
+keywords = ["lint", "linter", "static-analysis", "cargo"]
+categories = ["development-tools"]
+# An allowlist, so local working documents never ship whatever git's state is.
+include = ["/src", "/LICENSE", "/README.md"]
+
+[dependencies]
+anyhow = "1.0.104"
+cargo_metadata = "0.23.1"
+ra_ap_syntax = "=0.0.360"
+serde = { version = "1.0.229", features = ["derive"] }
+strum = { version = "0.28.0", features = ["derive"] }
+toml_edit = { version = "0.25.17", features = ["serde"] }
+toml_parser = "1.1.5"
+unicode-properties = { version = "0.1.4", default-features = false, features = ["emoji"] }
+
+[dev-dependencies]
+rstest = "0.28.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(samlinter)"] }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+as_conversions = "warn"
+float_arithmetic = "warn"
+indexing_slicing = "warn"
+match_wildcard_for_single_variants = "warn"
+missing_const_for_fn = "warn"
+string_slice = "warn"
+unnested_or_patterns = "warn"
+unwrap_used = "warn"
+wildcard_enum_match_arm = "warn"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

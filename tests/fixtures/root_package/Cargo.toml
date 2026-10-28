@@ -1,0 +1,16 @@
+[package]
+name = "root_package"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = ["member"]
+
+[dependencies]
+anyhow = "1"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

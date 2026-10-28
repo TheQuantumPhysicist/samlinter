@@ -1,0 +1,3 @@
+forbidden-words = []
+subscriber-crates = []
+severity = "warn"

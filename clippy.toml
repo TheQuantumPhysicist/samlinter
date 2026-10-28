@@ -1,0 +1,7 @@
+# - A failing test should panic at the line that failed.
+# - Result plumbing in tests adds noise, so `unwrap_used` is off in tests.
+allow-unwrap-in-tests = true
+disallowed-macros = [
+    { path = "std::matches", reason = "match exhaustively so a new variant forces a decision" },
+    { path = "strum::EnumIs", reason = "is_variant() is the matches! shortcut" },
+]
