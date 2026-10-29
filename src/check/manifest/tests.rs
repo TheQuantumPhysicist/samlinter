@@ -5,6 +5,7 @@ use crate::finding::{Exemptability, Rule};
 use crate::workspace::{Dependency, Package, PackageKind, Readme, Section};
 use ra_ap_syntax::Edition;
 use rstest::rstest;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use strum::IntoEnumIterator;
 use toml_edit::Key;
@@ -29,21 +30,15 @@ fn package(
         edition: Edition::Edition2024,
         dependencies,
         sources: Vec::new(),
-    }
-}
-
-/// A dependency as `cargo metadata` reports it.
-fn dependency(key: &str, crate_name: &str, section: Section, target: Option<&str>) -> Dependency {
-    Dependency {
-        key: key.to_owned(),
-        crate_name: crate_name.to_owned(),
-        section,
-        target: target.map(|platform| platform.parse().unwrap()),
+        library_code: BTreeSet::new(),
     }
 }
 
 fn subscriber(section: Section) -> Dependency {
-    dependency("tracing-subscriber", "tracing-subscriber", section, None)
+    Dependency {
+        crate_name: "tracing-subscriber".to_owned(),
+        section,
+    }
 }
 
 fn config() -> Config {
@@ -163,168 +158,25 @@ fn syntax_error_without_a_position_is_a_whole_file_finding() {
     );
 }
 
+/// The `library_subscriber` check reads a library's sources; the dependency alone is fine.
 #[rstest]
-#[case::direct(
-    "[dependencies]\ntracing-subscriber = { workspace = true }\n",
-    subscriber(Section::Normal),
-    &["2:1 library_subscriber"]
-)]
+#[case::direct("[dependencies]\ntracing-subscriber = { workspace = true }\n")]
 #[case::renamed_here(
-    "[dependencies]\nlogs = { package = \"tracing-subscriber\", workspace = true }\n",
-    dependency("logs", "tracing-subscriber", Section::Normal, None),
-    &["2:1 library_subscriber"]
-)]
-#[case::renamed_in_workspace_dependencies(
-    "[dependencies]\nlogs = { workspace = true }\n",
-    dependency("logs", "tracing-subscriber", Section::Normal, None),
-    &["2:1 library_subscriber"]
+    "[dependencies]\nlogs = { package = \"tracing-subscriber\", workspace = true }\n"
 )]
 #[case::target_specific(
-    "[target.'cfg(unix)'.dependencies]\ntracing-subscriber = { workspace = true }\n",
-    dependency("tracing-subscriber", "tracing-subscriber", Section::Normal, Some("cfg(unix)")),
-    &["2:1 library_subscriber"]
+    "[target.'cfg(unix)'.dependencies]\ntracing-subscriber = { workspace = true }\n"
 )]
-#[case::target_written_with_spaces(
-    "[target.'cfg( unix )'.dependencies]\ntracing-subscriber = { workspace = true }\n",
-    dependency("tracing-subscriber", "tracing-subscriber", Section::Normal, Some("cfg(unix)")),
-    &["2:1 library_subscriber"]
-)]
-#[case::target_triple(
-    "[target.x86_64-unknown-linux-gnu.dependencies]\ntracing-subscriber = { workspace = true }\n",
-    dependency(
-        "tracing-subscriber",
-        "tracing-subscriber",
-        Section::Normal,
-        Some("x86_64-unknown-linux-gnu")
-    ),
-    &["2:1 library_subscriber"]
-)]
-#[case::second_target(
-    "[target.'cfg(unix)'.dependencies]\nlogs = { workspace = true }\n\n[target.'cfg(windows)'.dependencies]\nlogs = { workspace = true }\n",
-    dependency("logs", "tracing-subscriber", Section::Normal, Some("cfg(windows)")),
-    &["5:1 library_subscriber"]
-)]
-#[case::in_tests(
-    "[dev-dependencies]\ntracing-subscriber = { workspace = true }\n",
-    subscriber(Section::Development),
-    &[]
-)]
-#[case::in_build_script(
-    "[build-dependencies]\ntracing-subscriber = { workspace = true }\n",
-    subscriber(Section::Build),
-    &[]
-)]
-#[case::other_crate(
-    "[dependencies]\ntracing = { workspace = true }\n",
-    dependency("tracing", "tracing", Section::Normal, None),
-    &[]
-)]
-#[case::same_key_in_two_sections(
-    "[dev-dependencies]\ntracing-subscriber = { workspace = true }\n\n[dependencies]\ntracing-subscriber = { workspace = true }\n",
-    subscriber(Section::Normal),
-    &["5:1 library_subscriber"]
-)]
-fn libraries_do_not_depend_on_subscribers(
-    #[case] text: &str,
-    #[case] dependency: Dependency,
-    #[case] expected: &[&str],
-) {
-    let package = package(text, PackageKind::Library, None, vec![dependency]);
-    assert_eq!(
-        render(&check(&Role::Member(&package), &config()).unwrap()),
-        expected
-    );
-}
-
-/// crates.io treats `-` and `_` in a crate name as one character.
-#[rstest]
-#[case::underscore_in_config("tracing_subscriber", "tracing-subscriber", &["2:1 library_subscriber"])]
-#[case::underscore_in_crate_name("tracing-subscriber", "tracing_subscriber", &["2:1 library_subscriber"])]
-#[case::both_underscored("tracing_subscriber", "tracing_subscriber", &["2:1 library_subscriber"])]
-#[case::separator_dropped("tracing_subscriber", "tracingsubscriber", &[])]
-fn subscriber_names_match_with_dash_and_underscore_alike(
-    #[case] configured: &str,
-    #[case] crate_name: &str,
-    #[case] expected: &[&str],
-) {
-    let text = format!("[dependencies]\n{crate_name} = {{ workspace = true }}\n");
+fn library_may_depend_on_a_subscriber(#[case] text: &str) {
     let package = package(
-        &text,
-        PackageKind::Library,
-        None,
-        vec![dependency(crate_name, crate_name, Section::Normal, None)],
-    );
-    let config = Config {
-        subscriber_crates: words(&[configured]),
-        ..config()
-    };
-    assert_eq!(
-        render(&check(&Role::Member(&package), &config).unwrap()),
-        expected
-    );
-}
-
-/// - Cargo reads the same text, so none of these reaches a real run.
-/// - Each would otherwise drop or misplace a `library_subscriber` finding.
-#[rstest]
-#[case::no_entry_with_the_key("[dependencies]\ntracing = { workspace = true }\n", None)]
-#[case::entry_in_another_section(
-    "[dev-dependencies]\ntracing-subscriber = { workspace = true }\n",
-    None
-)]
-#[case::top_level_entry_for_a_target_dependency(
-    "[dependencies]\ntracing-subscriber = { workspace = true }\n",
-    Some("cfg(unix)")
-)]
-#[case::target_entry_for_a_top_level_dependency(
-    "[target.'cfg(unix)'.dependencies]\ntracing-subscriber = { workspace = true }\n",
-    None
-)]
-#[case::unparsable_platform(
-    "[target.'<garbage>'.dependencies]\ntracing-subscriber = { workspace = true }\n",
-    Some("cfg(unix)")
-)]
-fn subscriber_without_its_entry_is_an_error(#[case] text: &str, #[case] target: Option<&str>) {
-    let dependency = dependency(
-        "tracing-subscriber",
-        "tracing-subscriber",
-        Section::Normal,
-        target,
-    );
-    let package = package(text, PackageKind::Library, None, vec![dependency]);
-    let error = check(&Role::Member(&package), &config()).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "Cargo.toml: `cargo metadata` lists dependency `tracing-subscriber`, but samlinter finds no entry for it in this file; please report this samlinter bug"
-    );
-}
-
-#[test]
-fn dependency_that_is_no_subscriber_needs_no_entry() {
-    let package = package(
-        "[dependencies]\n",
-        PackageKind::Library,
-        None,
-        vec![dependency("tracing", "tracing", Section::Normal, None)],
-    );
-    assert_eq!(
-        render(&check(&Role::Member(&package), &config()).unwrap()),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn root_package_library_does_not_depend_on_subscribers() {
-    let text = format!("{PROFILES}\n[dependencies]\ntracing-subscriber = \"0.3\"\n");
-    let package = package(
-        &text,
+        text,
         PackageKind::Library,
         None,
         vec![subscriber(Section::Normal)],
     );
     assert_eq!(
-        render(&check(&Role::RootPackage(&package), &config()).unwrap()),
-        ["8:1 library_subscriber"]
+        render(&check(&Role::Member(&package), &config()).unwrap()),
+        Vec::<String>::new()
     );
 }
 
@@ -441,6 +293,15 @@ fn root_package_gets_the_rules_of_every_manifest(#[case] tail: &str, #[case] exp
 )]
 fn member_version_exemption_names_the_dependency(#[case] text: &str, #[case] expected: &[&str]) {
     assert_eq!(library_member(text), expected);
+}
+
+/// No attribute can sit in a manifest comment, so its comment findings stay.
+#[test]
+fn comment_rule_exemption_in_a_manifest_is_malformed_and_lifts_nothing() {
+    assert_eq!(
+        library_member("[package.metadata.samlinter.expect.em_dash]\nx = \"why\" # a \u{2014} b\n"),
+        ["1:36 malformed_exemption", "2:15 em_dash"]
+    );
 }
 
 #[test]

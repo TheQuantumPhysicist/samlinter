@@ -9,6 +9,7 @@ use crate::finding::Finding;
 use crate::workspace::{Package, Readme, Root, Workspace};
 use anyhow::Result;
 use manifest::Role;
+use source::Gate;
 use std::collections::BTreeSet;
 
 #[cfg(test)]
@@ -25,11 +26,19 @@ use std::path::{Path, PathBuf};
 /// - An error is a finding samlinter cannot place, always a samlinter bug.
 pub fn run(workspace: &Workspace) -> Result<Vec<Finding>> {
     let config = &workspace.settings;
-    let root = root_findings(&workspace.root, config)?;
+    let root_package = match &workspace.root {
+        Root::Virtual {
+            manifest: _,
+            readme: _,
+        } => None,
+        Root::Package(package) => Some(package),
+    };
+    let gate = Gate::of(root_package.into_iter().chain(&workspace.members), config);
+    let root = root_findings(&workspace.root, config, &gate)?;
     let members = workspace
         .members
         .iter()
-        .map(|package| member_findings(package, config))
+        .map(|package| member_findings(package, config, &gate))
         .collect::<Result<Vec<_>>>()?;
 
     let findings: BTreeSet<Finding> = root
@@ -44,7 +53,7 @@ pub fn run(workspace: &Workspace) -> Result<Vec<Finding>> {
     Ok(findings.into_iter().collect())
 }
 
-fn root_findings(root: &Root, config: &Config) -> Result<Vec<Finding>> {
+fn root_findings(root: &Root, config: &Config, gate: &Gate) -> Result<Vec<Finding>> {
     let (manifest, files) = match root {
         Root::Virtual { manifest, readme } => (
             manifest::check(&Role::VirtualRoot(manifest), config)?,
@@ -52,25 +61,25 @@ fn root_findings(root: &Root, config: &Config) -> Result<Vec<Finding>> {
         ),
         Root::Package(package) => (
             manifest::check(&Role::RootPackage(package), config)?,
-            package_files(package, config),
+            package_files(package, config, gate),
         ),
     };
     Ok([manifest, files].concat())
 }
 
-fn member_findings(package: &Package, config: &Config) -> Result<Vec<Finding>> {
+fn member_findings(package: &Package, config: &Config, gate: &Gate) -> Result<Vec<Finding>> {
     Ok([
         manifest::check(&Role::Member(package), config)?,
-        package_files(package, config),
+        package_files(package, config, gate),
     ]
     .concat())
 }
 
-fn package_files(package: &Package, config: &Config) -> Vec<Finding> {
+fn package_files(package: &Package, config: &Config, gate: &Gate) -> Vec<Finding> {
     let sources = package
         .sources
         .iter()
-        .flat_map(|file| source::check(file, package.edition, config));
+        .flat_map(|file| source::check(file, package.edition, config, gate.installs(&file.path)));
     sources
         .chain(readme_findings(&package.readme, config))
         .collect()

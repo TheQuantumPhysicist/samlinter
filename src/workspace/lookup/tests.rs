@@ -1,4 +1,3 @@
-#[path = "../tests/on_drop.rs"]
 mod on_drop;
 
 use super::memory::{Content, Memory};

@@ -1,6 +1,3 @@
-#[cfg(test)]
-pub mod memory;
-
 use anyhow::{Context, Result, bail};
 use std::fs;
 use std::io;
@@ -331,6 +328,9 @@ pub fn relative(root_dir: &Path, path: &Path) -> PathBuf {
         (Err(_), Ending::Name | Ending::Separator | Ending::SeparatorDot) => path.to_path_buf(),
     }
 }
+
+#[cfg(test)]
+pub mod memory;
 
 #[cfg(test)]
 mod tests;

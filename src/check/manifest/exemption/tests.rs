@@ -101,6 +101,10 @@ fn malformed_exemption_exempts_nothing(#[case] exemption: &str) {
     "[package.metadata.samlinter.expect.rest_pattern]\nx = \"why\"\n",
     "1:36 rule `rest_pattern` is exempted in Rust source, not in Cargo.toml"
 )]
+#[case::comment_rule(
+    "[package.metadata.samlinter.expect.em_dash]\nx = \"why\"\n",
+    "1:36 rule `em_dash` is exempted in Rust source, not in Cargo.toml"
+)]
 fn malformed_exemption_says_what_is_wrong(#[case] text: &str, #[case] expected: &str) {
     let messages: Vec<String> = exempted(text)
         .into_iter()

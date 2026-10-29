@@ -1,4 +1,4 @@
-use super::{EXCLUDE_IS_FOR_GENERATED_CODE, Guidance};
+use super::{EXCLUDE_IS_FOR_GENERATED_CODE, EXEMPTING_NEEDS_APPROVAL, Guidance};
 use crate::finding::{Exemptability, Rule};
 use rstest::rstest;
 use std::collections::BTreeSet;
@@ -74,6 +74,10 @@ fn every_rule_explains_why_how_and_what_not_to_do() {
     Rule::PanicStrategy,
     "A panic means an invariant broke. With unwinding, only the panicking thread or task dies while the rest of the process keeps running on state that may be half-updated."
 )]
+#[case::path_attr(
+    Rule::PathAttr,
+    "`#[path]` overrides Rust's file-name-to-module mapping, so a module can live anywhere and the module tree stops mirroring the file system."
+)]
 #[case::rest_pattern(
     Rule::RestPattern,
     "`..` matches every field the pattern does not name, including fields added later."
@@ -113,18 +117,25 @@ fn bad_fixes_read_as_prohibitions() {
     }
 }
 
-/// `exclude` silences every rule, so every rule warns against using it for that.
+/// - `exclude` silences every rule, so every rule warns against using it for that.
+/// - Every exemptable rule warns against exempting without approval, before that.
 #[test]
-fn every_rule_ends_its_bad_fixes_with_the_exclude_warning() {
+fn every_rule_ends_its_bad_fixes_with_the_shared_ones() {
     for rule in Rule::iter() {
         let guidance = Guidance::of(rule);
         let own = guidance
             .bad_fixes
             .iter()
             .fold(String::new(), |text, point| text + "    - " + point + "\n");
+        let exempting = match rule.exemptability() {
+            Exemptability::Never => String::new(),
+            Exemptability::Source(_) | Exemptability::Manifest(_) => {
+                format!("    - {EXEMPTING_NEEDS_APPROVAL}\n")
+            }
+        };
         assert!(
             guidance.to_string().ends_with(&format!(
-                "  bad fixes:\n{own}    - {EXCLUDE_IS_FOR_GENERATED_CODE}\n"
+                "  bad fixes:\n{own}{exempting}    - {EXCLUDE_IS_FOR_GENERATED_CODE}\n"
             )),
             "{}",
             rule.name()
@@ -158,7 +169,7 @@ fn exemption_guidance_shows_where_each_exemptable_rule_is_exempted() {
             Exemptability::Source(_) => {
                 assert!(named, "{name}");
                 assert!(
-                    fix.contains(&format!("#[cfg_attr(samlinter, expect({name}, ")),
+                    fix.contains("#[cfg_attr(samlinter, expect(<rule>, "),
                     "{name}"
                 );
             }
@@ -179,6 +190,7 @@ fn renders_labeled_bullet_sections() {
         why: &["a"],
         fix: &["b", "c"],
         bad_fixes: &["Do not d"],
+        exemptability: Exemptability::Never,
     };
     assert_eq!(
         guidance.to_string(),

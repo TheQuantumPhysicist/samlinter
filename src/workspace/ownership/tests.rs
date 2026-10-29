@@ -1,24 +1,24 @@
 use super::super::lookup::Looked;
-use super::super::{ByManifest, PackageKind, PackageMetadata, Reached, TextFile};
-use super::{Reach, claim, owned_sources, owner};
+use super::super::{ByManifest, PackageKind, PackageMetadata, Reach, Reached, Source, TextFile};
+use super::{Claimant, claim, owned_sources, owner};
 use ra_ap_syntax::Edition;
 use rstest::rstest;
 use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 
 /// The package with `manifest`, reaching `files`.
-fn reach(manifest: &str, files: &[&str]) -> Reach {
-    Reach {
+fn claimant(manifest: &str, files: &[&str]) -> Claimant {
+    Claimant {
         manifest: PathBuf::from(manifest),
         files: files.iter().map(PathBuf::from).collect(),
     }
 }
 
 /// Each package by its manifest path, with the one file it reaches.
-fn reaches(packages: &[(&str, &str)]) -> Vec<Reach> {
+fn claimants(packages: &[(&str, &str)]) -> Vec<Claimant> {
     packages
         .iter()
-        .map(|(manifest, file)| reach(manifest, &[file]))
+        .map(|(manifest, file)| claimant(manifest, &[file]))
         .collect()
 }
 
@@ -71,13 +71,13 @@ fn the_strongest_reaching_package_owns_a_file(
     #[case] asking: &str,
     #[case] expected: &str,
 ) {
-    let reaches = reaches(packages);
-    let asking = reaches
+    let claimants = claimants(packages);
+    let asking = claimants
         .iter()
-        .find(|reach| reach.manifest == Path::new(asking))
+        .find(|claimant| claimant.manifest == Path::new(asking))
         .unwrap();
     assert_eq!(
-        owner(&reaches, Path::new(file), asking),
+        owner(&claimants, Path::new(file), asking),
         Path::new(expected)
     );
 }
@@ -94,27 +94,33 @@ fn a_claim_is_the_holding_directory_depth_then_the_lower_manifest(
     #[case] depth: Option<usize>,
 ) {
     assert_eq!(
-        claim(Path::new(file), &reach(manifest, &[file])),
+        claim(Path::new(file), &claimant(manifest, &[file])),
         (depth, Reverse(Path::new(manifest)))
     );
 }
 
+/// Each package by its manifest, its owned files, then the files it reaches as library code.
+type Kept = (PathBuf, Vec<PathBuf>, Vec<PathBuf>);
+
 #[test]
-fn each_package_keeps_only_the_files_it_owns() {
-    let package = |manifest: &str, sources: &[&str]| {
+fn each_package_keeps_the_files_it_owns_and_its_library_code() {
+    let package = |manifest: &str, sources: &[(&str, Reach)]| {
         let metadata = PackageMetadata {
             manifest_path: PathBuf::from(manifest),
             kind: PackageKind::Library,
             edition: Edition::Edition2024,
             dependencies: Vec::new(),
-            roots: Vec::new(),
+            targets: Vec::new(),
         };
         let sources = sources
             .iter()
-            .map(|path| TextFile {
-                path: PathBuf::from(path),
-                shown: PathBuf::from(path),
-                text: String::new(),
+            .map(|(path, reach)| Source {
+                file: TextFile {
+                    path: PathBuf::from(path),
+                    shown: PathBuf::from(path),
+                    text: String::new(),
+                },
+                reach: *reach,
             })
             .collect();
         let package = Reached {
@@ -125,13 +131,26 @@ fn each_package_keeps_only_the_files_it_owns() {
         (PathBuf::from(manifest), package)
     };
     let reached: ByManifest = [
-        package("/ws/a/Cargo.toml", &["/ws/a/src/lib.rs", "/ws/a/src/x.rs"]),
-        package("/ws/b/Cargo.toml", &["/ws/a/src/x.rs", "/ws/b/src/lib.rs"]),
+        package(
+            "/ws/a/Cargo.toml",
+            &[
+                ("/ws/a/src/lib.rs", Reach::Library),
+                ("/ws/a/src/tests.rs", Reach::NotLibrary),
+                ("/ws/a/src/x.rs", Reach::NotLibrary),
+            ],
+        ),
+        package(
+            "/ws/b/Cargo.toml",
+            &[
+                ("/ws/a/src/x.rs", Reach::Library),
+                ("/ws/b/src/lib.rs", Reach::Library),
+            ],
+        ),
     ]
     .into_iter()
     .collect();
 
-    let owned: Vec<(PathBuf, Vec<PathBuf>)> = owned_sources(reached)
+    let kept: Vec<Kept> = owned_sources(reached)
         .into_iter()
         .map(|(manifest, package)| {
             (
@@ -141,22 +160,23 @@ fn each_package_keeps_only_the_files_it_owns() {
                     .into_iter()
                     .map(|source| source.path)
                     .collect(),
+                package.library_code.into_iter().collect(),
             )
         })
         .collect();
+    let paths = |paths: &[&str]| paths.iter().map(PathBuf::from).collect::<Vec<_>>();
     assert_eq!(
-        owned,
+        kept,
         [
             (
                 PathBuf::from("/ws/a/Cargo.toml"),
-                vec![
-                    PathBuf::from("/ws/a/src/lib.rs"),
-                    PathBuf::from("/ws/a/src/x.rs")
-                ]
+                paths(&["/ws/a/src/lib.rs", "/ws/a/src/tests.rs", "/ws/a/src/x.rs"]),
+                paths(&["/ws/a/src/lib.rs"]),
             ),
             (
                 PathBuf::from("/ws/b/Cargo.toml"),
-                vec![PathBuf::from("/ws/b/src/lib.rs")]
+                paths(&["/ws/b/src/lib.rs"]),
+                paths(&["/ws/a/src/x.rs", "/ws/b/src/lib.rs"]),
             ),
         ]
     );

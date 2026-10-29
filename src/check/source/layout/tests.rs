@@ -22,6 +22,9 @@ fn first() {}
 fn second() {}
 
 #[cfg(test)]
+mod support;
+
+#[cfg(test)]
 mod tests;
 ";
 
@@ -78,7 +81,28 @@ fn canonical_module_passes() {
 #[case::tests_module_with_a_second_cfg("#[cfg(test)]\n#[cfg(unix)]\nmod tests;\n", &["1:1 item_order"])]
 #[case::tests_module_with_an_earlier_cfg("#[cfg(unix)]\n#[cfg(test)]\nmod tests;\n", &["1:1 item_order"])]
 #[case::tests_module_gate_with_a_value("#[cfg(test = \"x\")]\nmod tests;\n", &["1:1 item_order"])]
-#[case::test_gated_module_with_another_name("#[cfg(test)]\nmod helpers;\n\nuse std::io;\n", &[])]
+#[case::test_module_before_use("#[cfg(test)]\nmod helpers;\n\nuse std::io;\n", &["4:1 item_order"])]
+#[case::code_after_test_module("#[cfg(test)]\nmod helpers;\n\nfn f() {}\n", &["4:1 item_order"])]
+#[case::test_module_after_tests_module(
+    "#[cfg(test)]\nmod tests;\n#[cfg(test)]\nmod helpers;\n",
+    &["3:1 item_order"]
+)]
+#[case::public_test_module_at_the_end("fn f() {}\n\n#[cfg(test)]\npub mod helpers;\n", &[])]
+#[case::test_and_more_module_at_the_end("fn f() {}\n#[cfg(all(test, unix))]\nmod helpers;\n", &[])]
+#[case::inline_test_module_before_code(
+    "#[cfg(test)]\nmod helpers {\n    fn h() {}\n}\n\nfn f() {}\n",
+    &["6:1 item_order"]
+)]
+#[case::inner_gated_module_before_code(
+    "mod helpers {\n    #![cfg(test)]\n\n    fn h() {}\n}\n\nfn f() {}\n",
+    &["7:1 item_order"]
+)]
+#[case::inner_gated_module_at_the_end(
+    "fn f() {}\n\nmod helpers {\n    #![cfg(test)]\n\n    fn h() {}\n}\n\n#[cfg(test)]\nmod tests;\n",
+    &[]
+)]
+#[case::test_gated_function_stays_code("#[cfg(test)]\nfn t() {}\n\nfn f() {}\n", &[])]
+#[case::any_gated_module_is_a_mod_declaration("#[cfg(any(test, unix))]\nmod helpers;\n\nuse a;\n", &[])]
 #[case::tests_module_with_another_attribute("#[cfg(test)]\n#[path = \"t.rs\"]\nmod tests;\n", &[])]
 #[case::inline_module_body("mod m {\n    fn f() {}\n\n    use std::io;\n}\n", &["4:5 item_order"])]
 #[case::inline_tests_module_counts_as_code("mod tests {\n    fn t() {}\n}\n\nfn f() {}\n", &[])]
@@ -205,6 +229,10 @@ fn flags_functions_without_a_blank_line_between(#[case] text: &str, #[case] expe
 #[case::code_after_tests_module(
     "#[cfg(test)]\nmod tests;\n\nfn f() {}\n",
     "code after `mod tests;`"
+)]
+#[case::use_after_test_module(
+    "#[cfg(test)]\nmod helpers;\n\nuse std::io;\n",
+    "use item after #[cfg(test)] module"
 )]
 #[case::ungated_tests_module("fn f() {}\n\nmod tests;\n", TESTS_GATE)]
 #[case::tests_module_gate_with_more_conditions("#[cfg(all(test, unix))]\nmod tests;\n", TESTS_GATE)]

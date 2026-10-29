@@ -36,6 +36,7 @@ pub enum Rule {
     MalformedExemption,
     MemberVersion,
     PanicStrategy,
+    PathAttr,
     RestPattern,
     RestrictedVisibility,
     SyntaxError,
@@ -48,25 +49,28 @@ impl Rule {
         self.into()
     }
 
-    /// - Only rules whose written form carries an exception clause accept exemptions.
-    /// - Each is exempted in the one kind of file its findings come from.
-    /// - Exemption bookkeeping rules never are, so an exemption cannot hide itself.
+    /// - Every rule with findings in Rust source is exempted there, by an attribute.
+    /// - Comment rules also report in Cargo.toml, samlinter.toml and README files, where no
+    ///   attribute can sit, so those findings stay.
+    /// - Of the manifest rules only `member_version` has an exception clause.
+    /// - Syntax errors and exemption bookkeeping never are, so an exemption cannot hide itself.
     pub const fn exemptability(self) -> Exemptability {
         match self {
-            Self::RestPattern => Exemptability::Source(SourceExemptable::RestPattern),
-            Self::MemberVersion => Exemptability::Manifest(ManifestExemptable::MemberVersion),
-            Self::BinaryReadme
-            | Self::EmDash
+            Self::EmDash
             | Self::Emoji
-            | Self::FeatureFlags
             | Self::FnSpacing
             | Self::ForbiddenWord
             | Self::ItemOrder
             | Self::ItemSpacing
             | Self::LibrarySubscriber
+            | Self::PathAttr
+            | Self::RestPattern
+            | Self::RestrictedVisibility => Exemptability::Source(SourceExemptable(self)),
+            Self::MemberVersion => Exemptability::Manifest(ManifestExemptable::MemberVersion),
+            Self::BinaryReadme
+            | Self::FeatureFlags
             | Self::MalformedExemption
             | Self::PanicStrategy
-            | Self::RestrictedVisibility
             | Self::SyntaxError
             | Self::UnfulfilledExemption
             | Self::WorkspaceDependencyForm => Exemptability::Never,
@@ -93,17 +97,14 @@ impl Exemptability {
     }
 }
 
-/// Rules an exemption in Rust source may lift.
+/// - A rule an exemption in Rust source may lift.
+/// - Only `Rule::exemptability` builds one, so its match stays the one list of such rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SourceExemptable {
-    RestPattern,
-}
+pub struct SourceExemptable(Rule);
 
 impl From<SourceExemptable> for Rule {
     fn from(rule: SourceExemptable) -> Self {
-        match rule {
-            SourceExemptable::RestPattern => Self::RestPattern,
-        }
+        rule.0
     }
 }
 
@@ -152,6 +153,46 @@ impl Position {
             });
         Self { line, column }
     }
+}
+
+/// - The position of each of `offsets` in `text`, in the order given.
+/// - One pass over `text` for all of them, where `Position::of` per offset would read the text
+///   again each time: a file with many findings stays linear.
+pub fn positions(text: &str, offsets: &[usize]) -> Vec<Position> {
+    let (text, skipped) = match text.strip_prefix(BOM) {
+        Some(rest) => (rest, BOM.len_utf8()),
+        None => (text, 0),
+    };
+    let mut ascending: Vec<(usize, usize)> = offsets
+        .iter()
+        .map(|offset| offset.saturating_sub(skipped))
+        .zip(0..)
+        .collect();
+    ascending.sort_unstable();
+
+    let mut characters = text.char_indices().peekable();
+    let mut at = Position { line: 1, column: 1 };
+    let mut placed: Vec<(usize, Position)> = ascending
+        .into_iter()
+        .map(|(offset, order)| {
+            while let Some((_, character)) = characters.next_if(|(index, _)| *index < offset) {
+                at = if character == '\n' {
+                    Position {
+                        line: at.line + 1,
+                        column: 1,
+                    }
+                } else {
+                    Position {
+                        column: at.column + 1,
+                        ..at
+                    }
+                };
+            }
+            (order, at)
+        })
+        .collect();
+    placed.sort_unstable_by_key(|(order, _)| *order);
+    placed.into_iter().map(|(_, position)| position).collect()
 }
 
 impl fmt::Display for Position {
@@ -204,9 +245,15 @@ impl Hit {
     }
 
     pub fn into_finding(self, path: &Path, text: &str) -> Finding {
+        let position = Position::of(text, self.offset);
+        self.at(path, position)
+    }
+
+    /// The finding at `position`, the hit's offset already resolved.
+    pub fn at(self, path: &Path, position: Position) -> Finding {
         Finding {
             path: path.to_path_buf(),
-            span: Span::At(Position::of(text, self.offset)),
+            span: Span::At(position),
             rule: self.rule,
             message: self.message,
         }

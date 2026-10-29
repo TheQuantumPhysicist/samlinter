@@ -11,7 +11,9 @@ pub struct Config {
     ///   lines or consecutive line comments still matches.
     pub forbidden_words: Vec<Word>,
     /// - Crates that install a log subscriber.
-    /// - A package without a binary target may list them only as dev or build dependencies.
+    /// - A package without a binary target that lists one as a regular dependency gets its
+    ///   library code checked: each install call there (`.init()`, `set_global_default(..)`,
+    ///   ...) is a finding. The dependency alone is not.
     /// - `-` and `_` in a name match each other, as on crates.io.
     pub subscriber_crates: Vec<Word>,
 }

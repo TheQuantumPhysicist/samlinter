@@ -85,9 +85,21 @@ fn exemption_covers_its_node(#[case] text: &str) {
     "cfg_attr(samlinter, expect(rest_patterns, reason = \"why\"))",
     "unknown rule `rest_patterns`"
 )]
-#[case::rule_without_exception_clause(
-    "cfg_attr(samlinter, expect(em_dash, reason = \"why\"))",
-    "rule `em_dash` cannot be exempted"
+#[case::syntax_error(
+    "cfg_attr(samlinter, expect(syntax_error, reason = \"why\"))",
+    "rule `syntax_error` cannot be exempted"
+)]
+#[case::malformed_exemption(
+    "cfg_attr(samlinter, expect(malformed_exemption, reason = \"why\"))",
+    "rule `malformed_exemption` cannot be exempted"
+)]
+#[case::unfulfilled_exemption(
+    "cfg_attr(samlinter, expect(unfulfilled_exemption, reason = \"why\"))",
+    "rule `unfulfilled_exemption` cannot be exempted"
+)]
+#[case::manifest_rule_without_exception_clause(
+    "cfg_attr(samlinter, expect(feature_flags, reason = \"why\"))",
+    "rule `feature_flags` cannot be exempted"
 )]
 #[case::rule_exempted_in_cargo_toml(
     "cfg_attr(samlinter, expect(member_version, reason = \"why\"))",
@@ -160,22 +172,31 @@ fn reason_continuing_over_a_blank_line_is_malformed() {
 }
 
 #[rstest]
-#[case::file(
-    "#![cfg_attr(samlinter, expect(rest_pattern, reason = \"why\"))]\n\nfn f(v: V) {\n    let V { a, .. } = v;\n}\n",
-    &["4:16 rest_pattern", "1:1 malformed_exemption"]
-)]
+// - A function body holds nothing an inner attribute can own, so an inner exemption there
+//   is a stray one: malformed, the only place an inner exemption still is.
 #[case::function_body(
     "fn f(v: V) {\n    #![cfg_attr(samlinter, expect(rest_pattern, reason = \"why\"))]\n    let V { a, .. } = v;\n}\n",
     &["3:16 rest_pattern", "2:5 malformed_exemption"]
 )]
-fn inner_attribute_exemption_is_malformed(#[case] text: &str, #[case] expected: &[&str]) {
+fn inner_exemption_away_from_a_file_or_module_top_is_malformed(
+    #[case] text: &str,
+    #[case] expected: &[&str],
+) {
     assert_eq!(exempted(text), expected);
     assert_eq!(
         exemption_messages(text),
         [
-            "an exemption is an outer `#[...]` on the node it covers, never `#![...]`; write it on the item, field, match arm, statement or parameter that holds the violation"
+            "an exemption is an outer `#[...]` on the node it covers, or an inner `#![...]` at the top of a file or inline module; write it on the item, field, match arm, statement or parameter that holds the violation"
         ]
     );
+}
+
+/// At the top of a file an inner exemption is valid and covers the file's findings, its
+/// scope the attached file node's text.
+#[test]
+fn inner_exemption_at_the_file_top_covers_the_file() {
+    let text = "#![cfg_attr(samlinter, expect(rest_pattern, reason = \"why\"))]\n\nfn f(v: V) {\n    let V { a, .. } = v;\n}\n";
+    assert_eq!(exempted(text), Vec::<String>::new());
 }
 
 #[rstest]
@@ -203,9 +224,8 @@ fn exemption_on_a_sibling_is_unfulfilled() {
 
 #[test]
 fn each_listed_rule_is_a_separate_exemption() {
-    // Rust source has one exemptable rule, so the list repeats it.
     let text =
-        "#[cfg_attr(samlinter, expect(rest_pattern, rest_pattern, reason = \"why\"))]\nfn f() {}\n";
+        "#[cfg_attr(samlinter, expect(rest_pattern, em_dash, reason = \"why\"))]\nfn f() {}\n";
     assert_eq!(
         exempted(text),
         ["1:1 unfulfilled_exemption", "1:1 unfulfilled_exemption"]

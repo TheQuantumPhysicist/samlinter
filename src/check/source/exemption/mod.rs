@@ -1,13 +1,20 @@
 use super::super::exemption::apply_exemptions;
-use super::{is_bare_cfg_atom, start};
+use super::start;
 use crate::finding::{Exemptability, Hit, Rule, SourceExemptable};
+use crate::syntax::is_bare_cfg_atom;
 use ra_ap_syntax::{AstNode, AstToken, NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, T, ast};
 use std::ops::Range;
 
 const USAGE: &str =
     "expected exactly `expect(<rule>, reason = \"<why>\")` inside `cfg_attr(samlinter, ...)`";
 
-/// One rule named by a `#[cfg_attr(samlinter, expect(...))]` attribute.
+/// - One rule named by a `#[cfg_attr(samlinter, expect(...))]` attribute.
+/// - Its scope is the node's own text: an item or a field also holds its doc comments and the
+///   plain comments directly above it, which the parser files under it; a `let`, match arm or
+///   parameter does not. At the top of a file or an inline module the node is the file or the
+///   module's item list, so the scope is the file's or the module body's text.
+/// - A file's `//!` docs, a comment a blank line apart from the next item and comments after
+///   the last item sit in no node's scope.
 struct Exemption {
     rule: SourceExemptable,
     /// Byte range of the annotated node: item, field, match arm, statement or parameter.
@@ -118,11 +125,18 @@ fn cfg_attr_meta(meta: ast::Meta) -> Option<ast::CfgAttrMeta> {
 }
 
 /// - An exemption is an outer attribute on the node it covers.
-/// - An inner `#![...]` is not accepted, wherever it sits.
+/// - An inner `#![...]` is accepted where the node it is attached to holds findings on
+///   itself, where an inner `#![path]` can also sit: the top of a file, the body of an
+///   inline module. In a function body it covers nothing, so it is malformed there.
 fn placement(attr: &ast::Attr) -> Result<(), String> {
+    let on_findings_node = attr.syntax().parent().is_some_and(|node| {
+        let kind = node.kind();
+        kind == SyntaxKind::SOURCE_FILE || kind == SyntaxKind::ITEM_LIST
+    });
     match attr.kind() {
         ast::AttrKind::Outer => Ok(()),
-        ast::AttrKind::Inner => Err("an exemption is an outer `#[...]` on the node it covers, never `#![...]`; write it on the item, field, match arm, statement or parameter that holds the violation".to_owned()),
+        ast::AttrKind::Inner if on_findings_node => Ok(()),
+        ast::AttrKind::Inner => Err("an exemption is an outer `#[...]` on the node it covers, or an inner `#![...]` at the top of a file or inline module; write it on the item, field, match arm, statement or parameter that holds the violation".to_owned()),
     }
 }
 

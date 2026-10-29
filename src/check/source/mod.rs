@@ -1,20 +1,28 @@
 mod exemption;
 mod layout;
+mod path_attr;
 mod patterns;
+mod subscriber;
 mod visibility;
 
 use super::prose::{self, Piece};
 use crate::config::Config;
-use crate::finding::{BOM, Finding, Hit, Rule};
+use crate::finding::{BOM, Finding, Hit, Rule, positions};
 use crate::workspace::TextFile;
 use ra_ap_syntax::ast::CommentShape;
 use ra_ap_syntax::{AstNode, AstToken, Edition, NodeOrToken, SyntaxError, SyntaxNode, ast};
+pub use subscriber::{Gate, Installs};
 
-pub fn check(file: &TextFile, edition: Edition, config: &Config) -> Vec<Finding> {
+pub fn check(
+    file: &TextFile,
+    edition: Edition,
+    config: &Config,
+    installs: Installs,
+) -> Vec<Finding> {
     let text = rustc_input(&file.text);
 
     let hits = match parse(&text, edition) {
-        Ok(tree) => lint(&tree, &text, config),
+        Ok(tree) => lint(&tree, &text, config, installs),
         Err(errors) => errors
             .iter()
             .map(|error| {
@@ -27,8 +35,10 @@ pub fn check(file: &TextFile, edition: Edition, config: &Config) -> Vec<Finding>
             .collect(),
     };
 
+    let offsets: Vec<usize> = hits.iter().map(|hit| hit.offset).collect();
     hits.into_iter()
-        .map(|hit| hit.into_finding(&file.shown, &text))
+        .zip(positions(&text, &offsets))
+        .map(|(hit, position)| hit.at(&file.shown, position))
         .collect()
 }
 
@@ -49,12 +59,14 @@ fn parse(text: &str, edition: Edition) -> Result<ast::SourceFile, Vec<SyntaxErro
 }
 
 /// `text` is the source `tree` was parsed from.
-fn lint(tree: &ast::SourceFile, text: &str, config: &Config) -> Vec<Hit> {
+fn lint(tree: &ast::SourceFile, text: &str, config: &Config, installs: Installs) -> Vec<Hit> {
     let root = tree.syntax();
     let hits = patterns::check(root)
         .chain(visibility::check(root))
+        .chain(path_attr::check(root))
         .chain(layout::check(tree))
         .chain(comment_hits(root, text, config))
+        .chain(subscriber::check(root, installs))
         .collect();
     exemption::apply(root, hits)
 }
@@ -121,39 +133,6 @@ fn start(node: &SyntaxNode) -> usize {
         .find(|element| !element.kind().is_trivia());
     let range = first.map_or_else(|| node.text_range(), |element| element.text_range());
     usize::from(range.start())
-}
-
-/// `cfg(<name>)` with a bare identifier and no value.
-fn is_bare_cfg_atom(predicate: &ast::CfgPredicate, name: &str) -> bool {
-    match predicate {
-        ast::CfgPredicate::CfgAtom(atom) => is_bare_atom(atom, name),
-        ast::CfgPredicate::CfgComposite(_) => false,
-    }
-}
-
-/// The atom `<name>`, without a `= "value"`.
-fn is_bare_atom(atom: &ast::CfgAtom, name: &str) -> bool {
-    match Atom::of(atom) {
-        Atom::Bare(ident) => ident.text() == name,
-        Atom::Other => false,
-    }
-}
-
-/// The shape of a cfg atom that decides whether it names one bare cfg.
-enum Atom {
-    /// `name`, with no value.
-    Bare(ra_ap_syntax::SyntaxToken),
-    /// `name = "value"`, or an atom without a name, which rustc rejects.
-    Other,
-}
-
-impl Atom {
-    fn of(atom: &ast::CfgAtom) -> Self {
-        match (atom.ident_token(), atom.eq_token()) {
-            (Some(ident), None) => Self::Bare(ident),
-            (Some(_), Some(_)) | (None, None | Some(_)) => Self::Other,
-        }
-    }
 }
 
 /// Runs `rule` on edition-2024 `text`, which must parse.

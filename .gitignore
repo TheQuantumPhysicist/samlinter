@@ -1,4 +1,7 @@
 /target
+# Fixture workspaces are test inputs; their build artifacts stay out.
+/tests/fixtures/**/Cargo.lock
+/tests/fixtures/**/target/
 # Local working documents, not part of the published project.
 /CLAUDE.md
 /CODEMAP.md

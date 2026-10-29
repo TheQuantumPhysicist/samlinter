@@ -1,7 +1,15 @@
-#[path = "../src/workspace/tests/on_drop.rs"]
+#[cfg_attr(
+    samlinter,
+    expect(
+        path_attr,
+        reason = "one OnDrop shared with the unit tests: this test cannot reach #[cfg(test)] code, and those tests ship in src/, the only published part"
+    )
+)]
+#[path = "../src/workspace/lookup/tests/on_drop.rs"]
 mod on_drop;
 
 use on_drop::OnDrop;
+use rstest::rstest;
 use std::collections::BTreeSet;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -9,8 +17,13 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
-/// Finding lines in report order: grouped by rule in rule order, then by path and position.
+/// - Finding lines in report order: grouped by rule in rule order, then by path and position.
+/// - `lib` lists a subscriber crate as a regular dependency: only its library code's install
+///   call is a finding; its `#[cfg(test)]` module, `tests.rs`, integration test and example
+///   install freely.
+/// - `lib`'s em-dash exemption on `install` covers the doc comment above it.
 const VIOLATIONS: &[&str] = &[
     "app/Cargo.toml: binary_readme: binary package has no README at app/README.md",
     "README.md:1:11: em_dash: em-dash (U+2014)",
@@ -22,9 +35,8 @@ const VIOLATIONS: &[&str] = &[
     "app/src/main.rs:4:12: forbidden_word: `NOTES.md` is listed in forbidden-words in samlinter.toml",
     "samlinter.toml:3:8: forbidden_word: `NOTES.md` is listed in forbidden-words in samlinter.toml",
     "app/src/main.rs:2:1: item_spacing: no blank line between the last use item and this code",
-    "lib/Cargo.toml:14:1: library_subscriber: library package depends on `tracing-subscriber`",
-    "lib/Cargo.toml:17:1: library_subscriber: library package depends on `tracing-subscriber`",
-    "lib/src/lib.rs:1:1: malformed_exemption: rule `em_dash` cannot be exempted",
+    "lib/src/lib.rs:9:36: library_subscriber: library installs a log subscriber: `.init()`",
+    "lib/src/lib.rs:1:1: malformed_exemption: rule `syntax_error` cannot be exempted",
     "app/Cargo.toml:8:1: member_version: `anyhow` declares its version here; move the version to the root `[workspace.dependencies]` and write `anyhow = { workspace = true }`",
     "Cargo.toml: panic_strategy: no `[profile.release]` with `panic = \"abort\"`",
     "Cargo.toml:11:10: panic_strategy: `[profile.dev]` does not set `panic = \"abort\"`",
@@ -38,7 +50,13 @@ const VIOLATIONS: &[&str] = &[
 ///   reaches `src/from_tests.rs` and `src/elsewhere/q.rs` through `../`.
 /// - Files outside the tree (build output, a hidden directory, an orphan `src/orphan.rs`) hold
 ///   the same violation and stay silent.
+/// - Each `path` attribute the walk follows is itself a `path_attr` finding.
 const MODULE_TREE: &[&str] = &[
+    "src/lib.rs:3:18: path_attr: `path` attribute moves the module away from the file its module path names",
+    "src/lib.rs:4:21: path_attr: `path` attribute moves the module away from the file its module path names",
+    "src/lib.rs:6:3: path_attr: `path` attribute moves the module away from the file its module path names",
+    "tests/again.rs:1:3: path_attr: `path` attribute moves the module away from the file its module path names",
+    "tests/again.rs:3:3: path_attr: `path` attribute moves the module away from the file its module path names",
     "src/a/b.rs:1:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy",
     "src/a.rs:3:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy",
     "src/c/d.rs:1:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy",
@@ -63,6 +81,16 @@ const ROOT_PACKAGE: &[&str] = &[
 
 /// Nesting levels in `deep_workspace`, past the main thread's stack limit, near 3000.
 const DEPTH: usize = 5000;
+
+/// Statements in the one function of `wide_workspace`.
+const WIDTH: usize = 50_000;
+
+/// `.init()` calls chained in `chain_workspace`, each one finding.
+const CHAIN: usize = 20_000;
+
+/// - What a run on a deep or wide workspace may take, in a debug build on a loaded machine.
+/// - Each takes a second or two; a walk quadratic in the file size takes minutes.
+const TIME_BUDGET: Duration = Duration::from_secs(60);
 
 /// - Nesting levels in `deep_broken_workspace`.
 /// - Past what the parser's own 2 MiB drop thread frees, between 10000 and 15000: a file with a
@@ -144,6 +172,8 @@ fn assert_clean(output: &Output) {
     assert_eq!(output.status.code(), Some(0));
 }
 
+/// - `layers` lists a subscriber crate as a regular dependency and installs nothing.
+/// - `devlog` lists one only as a dev-dependency and calls `.init()` in library code.
 #[test]
 fn clean_workspace_prints_nothing_and_passes() {
     assert_clean(&samlinter("clean").unwrap());
@@ -155,6 +185,7 @@ fn sources_parse_with_their_package_edition() {
     assert_clean(&samlinter("edition_2021").unwrap());
 }
 
+/// Its `lib.rs` and `main.rs` both install a subscriber, which a binary package may.
 #[test]
 fn package_with_a_library_and_a_binary_is_a_binary_package() {
     assert_findings(&samlinter("lib_and_bin").unwrap(), LIB_AND_BIN);
@@ -210,6 +241,61 @@ fn sources_are_the_files_mod_declarations_reach() {
     assert_findings(&samlinter("modules").unwrap(), MODULE_TREE);
 }
 
+#[test]
+fn path_attribute_findings_print_their_guidance() {
+    let stdout = String::from_utf8(samlinter("modules").unwrap().stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    let after_last = lines
+        .iter()
+        .rposition(|line| line.contains(": path_attr: "))
+        .and_then(|last| lines.get(last + 1..last + 3));
+    assert_eq!(
+        after_last,
+        Some(
+            [
+                "  why:",
+                "    - `#[path]` overrides Rust's file-name-to-module mapping, so a module can live anywhere and the module tree stops mirroring the file system.",
+            ]
+            .as_slice()
+        )
+    );
+}
+
+/// What the one package of a scratch workspace says about logging.
+#[derive(Clone, Copy, Debug)]
+enum Logging {
+    /// No subscriber crate configured or depended on: `library_subscriber` reads nothing.
+    Silent,
+    /// The library lists a configured subscriber crate as a regular dependency, so
+    /// `library_subscriber` walks every file.
+    Subscriber,
+}
+
+/// The manifest and `samlinter.toml` of a one-package workspace named `name`.
+fn scratch_config(name: &str, logging: Logging) -> [(&'static str, String); 2] {
+    let (dependencies, subscribers) = match logging {
+        Logging::Silent => ("", ""),
+        Logging::Subscriber => (
+            "[dependencies]\ntracing-subscriber = \"0.3\"\n\n",
+            "\"tracing-subscriber\"",
+        ),
+    };
+    [
+        (
+            "Cargo.toml",
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+                 {dependencies}[workspace]\n\n[profile.dev]\npanic = \"abort\"\n\n\
+                 [profile.release]\npanic = \"abort\"\n"
+            ),
+        ),
+        (
+            "samlinter.toml",
+            format!("forbidden-words = []\nsubscriber-crates = [{subscribers}]\n"),
+        ),
+    ]
+}
+
 /// - Writes a one-package workspace named `name` holding `sources` in a directory of its own
 ///   under the OS temp directory, one per process.
 /// - Returns its manifest and a guard that removes the directory when dropped.
@@ -217,20 +303,16 @@ fn scratch_workspace(
     name: &str,
     sources: Vec<(&str, String)>,
 ) -> io::Result<(PathBuf, OnDrop<impl FnMut()>)> {
-    let config = [
-        (
-            "Cargo.toml",
-            format!(
-                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
-                 [workspace]\n\n[profile.dev]\npanic = \"abort\"\n\n[profile.release]\n\
-                 panic = \"abort\"\n"
-            ),
-        ),
-        (
-            "samlinter.toml",
-            "forbidden-words = []\nsubscriber-crates = []\n".to_owned(),
-        ),
-    ];
+    logged_workspace(name, Logging::Silent, sources)
+}
+
+/// `scratch_workspace` with `logging`.
+fn logged_workspace(
+    name: &str,
+    logging: Logging,
+    sources: Vec<(&str, String)>,
+) -> io::Result<(PathBuf, OnDrop<impl FnMut()>)> {
+    let config = scratch_config(name, logging);
     let files: Vec<(&str, String)> = config.into_iter().chain(sources).collect();
 
     let root = env::temp_dir().join(format!("samlinter-{name}-{}", process::id()));
@@ -249,9 +331,10 @@ fn scratch_workspace(
 /// - A workspace whose sources nest `DEPTH` levels deep.
 /// - `src/lib.rs`: `DEPTH` parentheses around a `..` left of `=`.
 /// - `src/deep.rs`: `DEPTH` inline modules around a `pub(crate)` item.
-fn deep_workspace() -> io::Result<(PathBuf, OnDrop<impl FnMut()>)> {
-    scratch_workspace(
+fn deep_workspace(logging: Logging) -> io::Result<(PathBuf, OnDrop<impl FnMut()>)> {
+    logged_workspace(
         "deep",
+        logging,
         vec![
             (
                 "src/lib.rs",
@@ -275,9 +358,10 @@ fn deep_workspace() -> io::Result<(PathBuf, OnDrop<impl FnMut()>)> {
 
 /// A workspace whose `src/broken.rs` nests `BROKEN_DEPTH` inline modules around a `mod` with no
 /// `;`.
-fn deep_broken_workspace() -> io::Result<(PathBuf, OnDrop<impl FnMut()>)> {
-    scratch_workspace(
+fn deep_broken_workspace(logging: Logging) -> io::Result<(PathBuf, OnDrop<impl FnMut()>)> {
+    logged_workspace(
         "deep_broken",
+        logging,
         vec![
             ("src/lib.rs", "mod broken;\n".to_owned()),
             (
@@ -292,11 +376,22 @@ fn deep_broken_workspace() -> io::Result<(PathBuf, OnDrop<impl FnMut()>)> {
     )
 }
 
-#[test]
-fn deeply_nested_sources_are_linted_not_a_crash() {
-    let (manifest, _cleanup) = deep_workspace().unwrap();
+/// Runs samlinter on `manifest`, asserting it finishes within `TIME_BUDGET`.
+fn run_timed(manifest: &Path) -> io::Result<Output> {
+    let started = Instant::now();
+    let output = run(&[OsStr::new("--manifest-path"), manifest.as_os_str()])?;
+    let elapsed = started.elapsed();
+    assert!(elapsed < TIME_BUDGET, "took {elapsed:?}");
+    Ok(output)
+}
+
+#[rstest]
+#[case::silent(Logging::Silent)]
+#[case::subscriber(Logging::Subscriber)]
+fn deeply_nested_sources_are_linted_not_a_crash(#[case] logging: Logging) {
+    let (manifest, _cleanup) = deep_workspace(logging).unwrap();
     assert_findings(
-        &run(&[OsStr::new("--manifest-path"), manifest.as_os_str()]).unwrap(),
+        &run_timed(&manifest).unwrap(),
         &[
             &format!(
                 "src/lib.rs:4:{}: rest_pattern: `..` absorbs every field this pattern does not name",
@@ -310,16 +405,60 @@ fn deeply_nested_sources_are_linted_not_a_crash() {
     );
 }
 
-#[test]
-fn deeply_nested_syntax_error_is_reported_not_a_crash() {
-    let (manifest, _cleanup) = deep_broken_workspace().unwrap();
+#[rstest]
+#[case::silent(Logging::Silent)]
+#[case::subscriber(Logging::Subscriber)]
+fn deeply_nested_syntax_error_is_reported_not_a_crash(#[case] logging: Logging) {
+    let (manifest, _cleanup) = deep_broken_workspace(logging).unwrap();
     assert_findings(
-        &run(&[OsStr::new("--manifest-path"), manifest.as_os_str()]).unwrap(),
+        &run_timed(&manifest).unwrap(),
         &[&format!(
             "src/broken.rs:{}:9: syntax_error: expected `;` or `{{`",
             BROKEN_DEPTH + 1
         )],
     );
+}
+
+/// `WIDTH` statements in one function, none an install, in a library with a subscriber.
+#[test]
+fn wide_function_is_linted_in_linear_time() {
+    let (manifest, _cleanup) = logged_workspace(
+        "wide",
+        Logging::Subscriber,
+        vec![(
+            "src/lib.rs",
+            format!(
+                "pub fn f(x: u8) -> u8 {{\n    x\n}}\n\npub fn g() {{\n{}}}\n",
+                "    f(0);\n".repeat(WIDTH)
+            ),
+        )],
+    )
+    .unwrap();
+    assert_clean(&run_timed(&manifest).unwrap());
+}
+
+/// `CHAIN` chained `.init()` calls in a library with a subscriber: one finding each.
+#[test]
+fn long_install_chain_is_linted_in_linear_time() {
+    let (manifest, _cleanup) = logged_workspace(
+        "chain",
+        Logging::Subscriber,
+        vec![(
+            "src/lib.rs",
+            format!("pub fn f(s: S) {{\n    s{};\n}}\n", ".init()".repeat(CHAIN)),
+        )],
+    )
+    .unwrap();
+    let expected: Vec<String> = (0..CHAIN)
+        .map(|index| {
+            format!(
+                "src/lib.rs:2:{}: library_subscriber: library installs a log subscriber: `.init()`",
+                7 + 7 * index
+            )
+        })
+        .collect();
+    let expected: Vec<&str> = expected.iter().map(String::as_str).collect();
+    assert_findings(&run_timed(&manifest).unwrap(), &expected);
 }
 
 /// - A `mod gone;` inside `DEPTH` inline modules names the files it tried, `DEPTH` levels deep.
@@ -440,17 +579,19 @@ fn run_through_a_linked_root(
     command.output()
 }
 
-/// The warning `src/lib.rs:2` gets in `run_through_a_linked_root`.
-const LINKED_ROOT_WARNING: &str = "samlinter: warning: src/lib.rs:2: `#[path]` climbs above the symlinked workspace root; module not followed\n";
+/// - A `src/lib.rs` whose `mod x;` on line 3 climbs out of the workspace root.
+/// - Its `path_attr` finding is exempted, so the warning is all a run reports about it.
+const LINKED_ROOT_LIB: &str = "#[cfg_attr(samlinter, expect(path_attr, reason = \"climbs out of the root on purpose\"))]\n#[path = \"../../x.rs\"]\nmod x;\n";
+
+/// The warning `LINKED_ROOT_LIB` gets in `run_through_a_linked_root`.
+const LINKED_ROOT_WARNING: &str = "samlinter: warning: src/lib.rs:3: `#[path]` climbs above the symlinked workspace root; module not followed\n";
 
 /// - `../../x.rs` leaves the linked root, so where it leads is unknown without following it.
 /// - A warning names the declaration; the exit status stays that of a clean run.
 #[cfg(unix)]
 #[test]
 fn path_climbing_out_of_a_symlinked_root_warns_and_is_not_followed() {
-    let output =
-        run_through_a_linked_root("linked_root", "#[path = \"../../x.rs\"]\nmod x;\n", |_| ())
-            .unwrap();
+    let output = run_through_a_linked_root("linked_root", LINKED_ROOT_LIB, |_| ()).unwrap();
     assert_eq!(String::from_utf8_lossy(&output.stderr), LINKED_ROOT_WARNING);
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert_eq!(output.status.code(), Some(0));
@@ -462,14 +603,14 @@ fn path_climbing_out_of_a_symlinked_root_warns_and_is_not_followed() {
 fn warning_beside_a_finding_keeps_the_findings_exit_status() {
     let output = run_through_a_linked_root(
         "linked_root_finding",
-        "#[path = \"../../x.rs\"]\nmod x;\n\npub(crate) fn f() {}\n",
+        &format!("{LINKED_ROOT_LIB}\npub(crate) fn f() {{}}\n"),
         |_| (),
     )
     .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         finding_lines(&stdout),
-        ["src/lib.rs:4:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy"]
+        ["src/lib.rs:5:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy"]
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
@@ -484,13 +625,9 @@ fn warning_beside_a_finding_keeps_the_findings_exit_status() {
 fn unwritable_stderr_with_only_a_warning_is_an_error() {
     let (reader, writer) = io::pipe().unwrap();
     drop(reader);
-    let output = run_through_a_linked_root(
-        "linked_root_closed",
-        "#[path = \"../../x.rs\"]\nmod x;\n",
-        |command| {
-            command.stdout(Stdio::piped()).stderr(writer);
-        },
-    )
+    let output = run_through_a_linked_root("linked_root_closed", LINKED_ROOT_LIB, |command| {
+        command.stdout(Stdio::piped()).stderr(writer);
+    })
     .unwrap();
     assert_eq!(output.status.code(), Some(2));
 }

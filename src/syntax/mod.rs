@@ -1,3 +1,9 @@
+mod cfg;
+
+pub use cfg::{
+    cfg_attributes, has_test_attribute, is_bare_cfg_atom, is_test_gated, is_test_module,
+    requires_test,
+};
 use ra_ap_syntax::{AstNode, Edition, SyntaxError, SyntaxNode, WalkEvent, ast};
 
 /// - Tree depth up to which `ra_ap_syntax`'s own drop thread frees a tree safely.
@@ -45,6 +51,16 @@ pub fn parse(text: &str, edition: Edition) -> (ast::SourceFile, Vec<SyntaxError>
         Depth::Deep => std::mem::forget(parse),
     }
     parsed
+}
+
+/// - The value of `path = <expr>`, the one definition of a `path` attribute, with a bare
+///   `path` key or its raw-identifier spelling `r#path`, which rustc accepts alike.
+/// - Shared by the module walk, which follows it, and `path_attr`, which reports it.
+pub fn path_value(pair: &ast::KeyValueMeta) -> Option<ast::Expr> {
+    pair.path()
+        .and_then(|path| path.as_single_name_ref())
+        .filter(|name| name.text().trim_start_matches("r#") == "path")
+        .and(pair.expr())
 }
 
 #[cfg(test)]

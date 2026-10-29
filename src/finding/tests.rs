@@ -1,4 +1,6 @@
-use super::{Exemptability, Finding, ManifestExemptable, Position, Rule, SourceExemptable, Span};
+use super::{
+    Exemptability, Finding, ManifestExemptable, Position, Rule, SourceExemptable, Span, positions,
+};
 use rstest::rstest;
 use std::path::PathBuf;
 use strum::IntoEnumIterator;
@@ -22,6 +24,22 @@ fn position_counts_lines_and_characters(
 }
 
 #[rstest]
+#[case::plain("ab\ncd\u{e9}f\n", &[7, 0, 3, 7, 2, 4])]
+#[case::leading_bom("\u{feff}a\nb", &[5, 0, 3, 4])]
+#[case::past_the_end("ab", &[9, 1])]
+#[case::none("ab", &[])]
+fn positions_match_one_position_each_in_the_given_order(
+    #[case] text: &str,
+    #[case] offsets: &[usize],
+) {
+    let each: Vec<Position> = offsets
+        .iter()
+        .map(|offset| Position::of(text, *offset))
+        .collect();
+    assert_eq!(positions(text, offsets), each);
+}
+
+#[rstest]
 #[case::positioned(
     Span::At(Position { line: 3, column: 7 }),
     "src/lib.rs:3:7: rest_pattern: message"
@@ -40,19 +58,52 @@ fn finding_renders_path_position_rule_message(#[case] span: Span, #[case] expect
 #[rstest]
 #[case::rest_pattern(
     "rest_pattern",
-    Ok(Exemptability::Source(SourceExemptable::RestPattern))
+    Ok(Exemptability::Source(SourceExemptable(Rule::RestPattern)))
 )]
+#[case::em_dash("em_dash", Ok(Exemptability::Source(SourceExemptable(Rule::EmDash))))]
 #[case::member_version(
     "member_version",
     Ok(Exemptability::Manifest(ManifestExemptable::MemberVersion))
 )]
-#[case::not_exemptable("em_dash", Ok(Exemptability::Never))]
+#[case::not_exemptable("syntax_error", Ok(Exemptability::Never))]
 #[case::unknown("rest_patterns", Err("unknown rule `rest_patterns`"))]
 fn exemptions_name_existing_rules(
     #[case] name: &str,
     #[case] expected: Result<Exemptability, &str>,
 ) {
     assert_eq!(Exemptability::named(name), expected.map_err(str::to_owned));
+}
+
+/// Where each rule is exempted, as the README states it.
+fn exempted_in(rule: Rule) -> &'static str {
+    match rule.exemptability() {
+        Exemptability::Never => "nowhere",
+        Exemptability::Source(_) => "rust",
+        Exemptability::Manifest(_) => "cargo.toml",
+    }
+}
+
+#[rstest]
+#[case::binary_readme(Rule::BinaryReadme, "nowhere")]
+#[case::em_dash(Rule::EmDash, "rust")]
+#[case::emoji(Rule::Emoji, "rust")]
+#[case::feature_flags(Rule::FeatureFlags, "nowhere")]
+#[case::fn_spacing(Rule::FnSpacing, "rust")]
+#[case::forbidden_word(Rule::ForbiddenWord, "rust")]
+#[case::item_order(Rule::ItemOrder, "rust")]
+#[case::item_spacing(Rule::ItemSpacing, "rust")]
+#[case::library_subscriber(Rule::LibrarySubscriber, "rust")]
+#[case::malformed_exemption(Rule::MalformedExemption, "nowhere")]
+#[case::member_version(Rule::MemberVersion, "cargo.toml")]
+#[case::panic_strategy(Rule::PanicStrategy, "nowhere")]
+#[case::path_attr(Rule::PathAttr, "rust")]
+#[case::rest_pattern(Rule::RestPattern, "rust")]
+#[case::restricted_visibility(Rule::RestrictedVisibility, "rust")]
+#[case::syntax_error(Rule::SyntaxError, "nowhere")]
+#[case::unfulfilled_exemption(Rule::UnfulfilledExemption, "nowhere")]
+#[case::workspace_dependency_form(Rule::WorkspaceDependencyForm, "nowhere")]
+fn each_rule_is_exempted_where_its_findings_are(#[case] rule: Rule, #[case] expected: &str) {
+    assert_eq!(exempted_in(rule), expected);
 }
 
 #[test]

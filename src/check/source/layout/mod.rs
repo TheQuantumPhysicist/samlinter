@@ -1,5 +1,6 @@
-use super::{is_bare_atom, is_bare_cfg_atom, start};
+use super::start;
 use crate::finding::{Hit, Rule};
+use crate::syntax::{cfg_attributes, is_bare_cfg_atom, is_test_gated, is_test_module};
 use ra_ap_syntax::ast::{self, HasAttrs, HasModuleItem, HasName};
 use ra_ap_syntax::{AstNode, AstToken, SyntaxNode, SyntaxToken};
 use std::cmp::Ordering;
@@ -15,6 +16,8 @@ enum Slot {
     TestUse,
     #[strum(serialize = "code")]
     Code,
+    #[strum(serialize = "#[cfg(test)] module")]
+    TestModule,
     #[strum(serialize = "`mod tests;`")]
     TestsModule,
 }
@@ -28,7 +31,9 @@ impl Slot {
     const fn within(self) -> Spacing {
         match self {
             Self::Use | Self::TestUse => Spacing::Contiguous,
-            Self::ModDeclaration | Self::Code | Self::TestsModule => Spacing::Free,
+            Self::ModDeclaration | Self::Code | Self::TestModule | Self::TestsModule => {
+                Spacing::Free
+            }
         }
     }
 
@@ -36,7 +41,7 @@ impl Slot {
     const fn before_next(self) -> Spacing {
         match self {
             Self::ModDeclaration | Self::Use | Self::TestUse => Spacing::Separated,
-            Self::Code | Self::TestsModule => Spacing::Free,
+            Self::Code | Self::TestModule | Self::TestsModule => Spacing::Free,
         }
     }
 }
@@ -175,7 +180,7 @@ fn kind(item: &ast::Item) -> Kind {
         ast::Item::Module(module) => Kind::Slotted(module_slot(module)),
         // `extern crate` is a use item, under the same cfg rule.
         ast::Item::ExternCrate(_) | ast::Item::Use(_) => {
-            if is_test_only(item) {
+            if is_test_gated(item.syntax()) {
                 Kind::Slotted(Slot::TestUse)
             } else {
                 Kind::Slotted(Slot::Use)
@@ -197,58 +202,21 @@ fn kind(item: &ast::Item) -> Kind {
     }
 }
 
+/// - `mod tests;` is last whatever its gate, so a wrong gate gets the gate finding.
+/// - Any other test-only module, declared or inline, sits between the code and `mod tests;`.
 fn module_slot(module: &ast::Module) -> Slot {
-    match module.item_list() {
-        Some(_) => Slot::Code,
-        None => match module.name() {
-            Some(name) if name.text() == "tests" => Slot::TestsModule,
-            Some(_) | None => Slot::ModDeclaration,
-        },
-    }
-}
-
-fn cfg_attributes(item: &impl HasAttrs) -> impl Iterator<Item = ast::CfgMeta> {
-    item.attrs()
-        .filter_map(|attr| attr.meta())
-        .filter_map(cfg_meta)
-}
-
-fn cfg_meta(meta: ast::Meta) -> Option<ast::CfgMeta> {
-    match meta {
-        ast::Meta::CfgMeta(cfg) => Some(cfg),
-        ast::Meta::CfgAttrMeta(_)
-        | ast::Meta::KeyValueMeta(_)
-        | ast::Meta::PathMeta(_)
-        | ast::Meta::TokenTreeMeta(_)
-        | ast::Meta::UnsafeMeta(_) => None,
-    }
-}
-
-/// Stacked cfg attributes all apply, so one that requires `test` makes the item test-only.
-fn is_test_only(item: &impl HasAttrs) -> bool {
-    cfg_attributes(item)
-        .filter_map(|cfg| cfg.cfg_predicate())
-        .any(|predicate| requires_test(&predicate))
-}
-
-/// - Whether `predicate` holds only when a bare `test` does.
-/// - Every member of `all(..)` must hold; `any(..)` and `not(..)` require no single member.
-fn requires_test(predicate: &ast::CfgPredicate) -> bool {
-    match predicate {
-        ast::CfgPredicate::CfgAtom(atom) => is_bare_atom(atom, "test"),
-        ast::CfgPredicate::CfgComposite(composite) => match composite.keyword() {
-            Some(keyword) if keyword.text() == "all" => composite
-                .cfg_predicates()
-                .any(|member| requires_test(&member)),
-            // `any`, `not`, and keywords rustc rejects.
-            Some(_) | None => false,
-        },
+    let named_tests = module.name().is_some_and(|name| name.text() == "tests");
+    match (module.item_list(), named_tests, is_test_module(module)) {
+        (None, true, _) => Slot::TestsModule,
+        (Some(_), _, true) | (None, false, true) => Slot::TestModule,
+        (Some(_), _, false) => Slot::Code,
+        (None, false, false) => Slot::ModDeclaration,
     }
 }
 
 /// Stacked cfg attributes combine like `cfg(all(..))`, so a second one is a further condition.
 fn is_only_cfg_test(item: &impl HasAttrs) -> bool {
-    let cfgs: Vec<ast::CfgMeta> = cfg_attributes(item).collect();
+    let cfgs: Vec<ast::CfgMeta> = cfg_attributes(item.attrs()).collect();
     match cfgs.as_slice() {
         [only] => only
             .cfg_predicate()
@@ -266,7 +234,7 @@ fn gate_hit(item: &ast::Item, slot: Slot) -> Option<Hit> {
                 "`mod tests;` needs exactly one cfg attribute, #[cfg(test)]; further conditions belong inside tests.rs",
             )
         }),
-        Slot::ModDeclaration | Slot::Use | Slot::TestUse | Slot::Code => None,
+        Slot::ModDeclaration | Slot::Use | Slot::TestUse | Slot::Code | Slot::TestModule => None,
     }
 }
 

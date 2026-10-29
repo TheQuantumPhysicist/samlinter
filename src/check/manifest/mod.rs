@@ -3,9 +3,8 @@ mod exemption;
 use super::toml_comments;
 use crate::config::Config;
 use crate::finding::{Finding, ManifestExemptable, Position, Rule, Span};
-use crate::workspace::{Dependency, Package, PackageKind, Readme, Section, TextFile};
+use crate::workspace::{Package, PackageKind, Readme, Section, TextFile};
 use anyhow::{Result, anyhow};
-use cargo_metadata::cargo_platform::Platform;
 use std::path::Path;
 use toml_edit::{Document, Item, Key, Table, TableLike, Value};
 
@@ -25,28 +24,14 @@ impl Role<'_> {
     }
 }
 
-/// Why samlinter cannot place a finding in the manifest text.
-#[derive(Clone, Copy)]
-enum Reason {
-    /// A `cargo metadata` dependency with no entry in the manifest text it came from; cargo
-    /// reads the same text.
-    MissingEntry,
-    /// A key with no position in the text; `toml_edit` gives every parsed key one.
-    KeyWithoutSpan,
-}
-
-/// - A finding samlinter cannot place in the manifest text, `manifest` as output shows it.
-/// - Always a samlinter bug: the run stops rather than drop or misplace the finding.
-fn unplaced(manifest: &Path, key: &str, reason: Reason) -> anyhow::Error {
-    let manifest = manifest.display();
-    match reason {
-        Reason::MissingEntry => anyhow!(
-            "{manifest}: `cargo metadata` lists dependency `{key}`, but samlinter finds no entry for it in this file; please report this samlinter bug"
-        ),
-        Reason::KeyWithoutSpan => anyhow!(
-            "{manifest}: the parsed key `{key}` has no position in this file; please report this samlinter bug"
-        ),
-    }
+/// - A finding at a key with no position in the text, `manifest` as output shows it.
+/// - `toml_edit` gives every parsed key one, so this is always a samlinter bug: the run stops
+///   rather than drop or misplace the finding.
+fn unplaced(manifest: &Path, key: &str) -> anyhow::Error {
+    anyhow!(
+        "{}: the parsed key `{key}` has no position in this file; please report this samlinter bug",
+        manifest.display()
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -64,7 +49,6 @@ enum Location<'a> {
 enum FixedRule {
     BinaryReadme,
     FeatureFlags,
-    LibrarySubscriber,
     MalformedExemption,
     PanicStrategy,
     SyntaxError,
@@ -77,7 +61,6 @@ impl From<FixedRule> for Rule {
         match rule {
             FixedRule::BinaryReadme => Self::BinaryReadme,
             FixedRule::FeatureFlags => Self::FeatureFlags,
-            FixedRule::LibrarySubscriber => Self::LibrarySubscriber,
             FixedRule::MalformedExemption => Self::MalformedExemption,
             FixedRule::PanicStrategy => Self::PanicStrategy,
             FixedRule::SyntaxError => Self::SyntaxError,
@@ -151,7 +134,7 @@ impl<'a> Violation<'a> {
             Location::Key(key) => {
                 let range = key
                     .span()
-                    .ok_or_else(|| unplaced(&manifest.shown, key.get(), Reason::KeyWithoutSpan))?;
+                    .ok_or_else(|| unplaced(&manifest.shown, key.get()))?;
                 at(range.start)
             }
             Location::Offset(offset) => at(offset),
@@ -169,26 +152,11 @@ impl<'a> Violation<'a> {
 struct Entry<'a> {
     key: &'a Key,
     declaration: Declaration<'a>,
-    section: Section,
-    /// The `<platform>` of the `[target.<platform>]` table holding the entry, as written.
-    target: Option<&'a str>,
 }
 
 impl Entry<'_> {
     fn name(&self) -> &str {
         self.key.get()
-    }
-
-    /// Compares parsed platforms, so spacing inside `cfg(...)` does not matter.
-    fn declares(&self, dependency: &Dependency) -> bool {
-        let same_target = match (self.target, &dependency.target) {
-            (None, None) => true,
-            (Some(written), Some(platform)) => written
-                .parse::<Platform>()
-                .is_ok_and(|parsed| parsed == *platform),
-            (None, Some(_)) | (Some(_), None) => false,
-        };
-        same_target && self.section == dependency.section && self.name() == dependency.key
     }
 }
 
@@ -237,7 +205,7 @@ pub fn check(role: &Role, config: &Config) -> Result<Vec<Finding>> {
     let manifest = role.manifest();
     match &Document::parse(manifest.text.as_str()) {
         Ok(document) => Ok([
-            placed(lint(document.as_table(), role, config)?, manifest)?,
+            placed(lint(document.as_table(), role), manifest)?,
             toml_comments::check(manifest, &config.forbidden_words),
         ]
         .concat()),
@@ -263,14 +231,14 @@ fn placed(violations: Vec<Violation>, manifest: &TextFile) -> Result<Vec<Finding
         .collect()
 }
 
-fn lint<'a>(root: &'a Table, role: &Role, config: &Config) -> Result<Vec<Violation<'a>>> {
+fn lint<'a>(root: &'a Table, role: &Role) -> Vec<Violation<'a>> {
     let by_role: Vec<Violation> = match role {
         Role::VirtualRoot(_) => panic_strategy(root),
-        Role::RootPackage(package) => [panic_strategy(root), package_rules(root, package, config)?]
+        Role::RootPackage(package) => [panic_strategy(root), package_rules(package)]
             .into_iter()
             .flatten()
             .collect(),
-        Role::Member(package) => [member_versions(root), package_rules(root, package, config)?]
+        Role::Member(package) => [member_versions(root), package_rules(package)]
             .into_iter()
             .flatten()
             .collect(),
@@ -281,7 +249,7 @@ fn lint<'a>(root: &'a Table, role: &Role, config: &Config) -> Result<Vec<Violati
         .chain(by_role)
         .collect();
 
-    Ok(exemption::apply(root, violations))
+    exemption::apply(root, violations)
 }
 
 fn feature_flags(root: &Table) -> Vec<Violation<'_>> {
@@ -382,14 +350,11 @@ fn panic_strategy(root: &Table) -> Vec<Violation<'_>> {
         .collect()
 }
 
-fn package_rules<'a>(
-    root: &'a Table,
-    package: &Package,
-    config: &Config,
-) -> Result<Vec<Violation<'a>>> {
+/// A library's `library_subscriber` check reads its sources, not its manifest.
+fn package_rules<'a>(package: &Package) -> Vec<Violation<'a>> {
     match package.kind {
-        PackageKind::Binary => Ok(binary_readme(package)),
-        PackageKind::Library => library_subscribers(root, package, config),
+        PackageKind::Binary => binary_readme(package),
+        PackageKind::Library => Vec::new(),
     }
 }
 
@@ -403,85 +368,32 @@ fn binary_readme<'a>(package: &Package) -> Vec<Violation<'a>> {
     }
 }
 
-/// - Driven by the `cargo metadata` dependencies, which carry each real crate name after every
-///   rename; the manifest text only places each finding.
-/// - Dev and build dependencies may use a subscriber; they never reach the library's users.
-fn library_subscribers<'a>(
-    root: &'a Table,
-    package: &Package,
-    config: &Config,
-) -> Result<Vec<Violation<'a>>> {
-    let entries = dependencies(root);
-    package
-        .dependencies
-        .iter()
-        .filter(|dependency| match dependency.section {
-            Section::Normal => true,
-            Section::Development | Section::Build => false,
-        })
-        .filter(|dependency| {
-            config
-                .subscriber_crates
-                .iter()
-                .any(|subscriber| same_crate_name(subscriber.as_str(), &dependency.crate_name))
-        })
-        .map(|dependency| {
-            let entry = entries
-                .iter()
-                .find(|entry| entry.declares(dependency))
-                .ok_or_else(|| {
-                    unplaced(
-                        &package.manifest.shown,
-                        &dependency.key,
-                        Reason::MissingEntry,
-                    )
-                })?;
-            Ok(Violation::at_key(
-                entry.key,
-                FixedRule::LibrarySubscriber,
-                format!("library package depends on `{}`", dependency.crate_name),
-            ))
-        })
-        .collect()
-}
-
-/// crates.io treats `-` and `_` in a crate name as one character, so both name one crate.
-fn same_crate_name(first: &str, second: &str) -> bool {
-    let unified = |character| if character == '_' { '-' } else { character };
-    first.chars().map(unified).eq(second.chars().map(unified))
-}
-
 /// Entries of the dependency tables at the top level and under every `[target.<platform>]`.
 fn dependencies(root: &Table) -> Vec<Entry<'_>> {
-    let top_level: (Option<&str>, &dyn TableLike) = (None, root);
+    let top_level: &dyn TableLike = root;
     let targets = root.get("target").and_then(Item::as_table_like);
-    let target_scopes = targets.into_iter().flat_map(|targets| {
-        targets
-            .iter()
-            .filter_map(|(platform, item)| Some((Some(platform), item.as_table_like()?)))
-    });
+    let target_scopes = targets
+        .into_iter()
+        .flat_map(|targets| targets.iter().filter_map(|(_, item)| item.as_table_like()));
     std::iter::once(top_level)
         .chain(target_scopes)
-        .flat_map(|(target, scope)| {
-            sections(scope)
-                .into_iter()
-                .flat_map(move |(table, section)| {
-                    entries(table).into_iter().map(move |(key, item)| Entry {
-                        key,
-                        declaration: Declaration::of(item),
-                        section,
-                        target,
-                    })
+        .flat_map(|scope| {
+            sections(scope).into_iter().flat_map(|table| {
+                entries(table).into_iter().map(|(key, item)| Entry {
+                    key,
+                    declaration: Declaration::of(item),
                 })
+            })
         })
         .collect()
 }
 
 /// The dependency tables of one scope; its other keys are not dependency tables.
-fn sections(scope: &dyn TableLike) -> Vec<(&dyn TableLike, Section)> {
+fn sections(scope: &dyn TableLike) -> Vec<&dyn TableLike> {
     scope
         .iter()
-        .filter_map(|(name, item)| Some((item.as_table_like()?, name.parse().ok()?)))
+        .filter(|(name, _)| name.parse::<Section>().is_ok())
+        .filter_map(|(_, item)| item.as_table_like())
         .collect()
 }
 

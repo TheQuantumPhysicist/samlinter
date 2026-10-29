@@ -109,12 +109,14 @@ Rust sources are found the way the compiler finds them, not by listing directori
 | --- | --- |
 | `rest_pattern` | `..` inside struct, tuple-struct and tuple patterns, which silently absorbs a field added later |
 | `restricted_visibility` | `pub(crate)`, `pub(super)`, `pub(in path)` |
-| `item_order` | module items out of order: mod declarations, use items, `#[cfg(test)]` use items, code, `#[cfg(test)] mod tests;` |
+| `item_order` | module items out of order: mod declarations, use items, `#[cfg(test)]` use items, code, other `#[cfg(test)]` modules, `#[cfg(test)] mod tests;` |
 | `item_spacing` | a blank line inside a group of use items, or no blank line after the mod declarations, the use items or the `#[cfg(test)]` use items |
 | `fn_spacing` | consecutive functions with bodies, in a module, an impl or trait body, or a block, with no blank line between them |
 | `em_dash` | U+2014 in a comment |
 | `emoji` | an emoji in a comment, one finding per visible emoji, at its first character |
 | `forbidden_word` | a configured word or phrase in a comment |
+| `library_subscriber` | a call that installs a log subscriber in a library's code, see below |
+| `path_attr` | each `path` attribute: `#[path = ".."]`, `#![path = ".."]` and a `path` inside `cfg_attr(..)`, see below |
 
 - `rest_pattern`: also on the left of a destructuring assignment, such as `(a, ..) = t;` or
   `(..) = t;`.
@@ -123,7 +125,12 @@ Rust sources are found the way the compiler finds them, not by listing directori
   require `test`: a stacked `#[cfg(test)]`, or `test` inside `all(..)`.
 - `item_order`: `any(..)` and `not(..)` do not count.
 - `item_order`: `extern crate` counts as a use item, by the same cfg rule.
-- `item_order`: an inline `mod tests { .. }` counts as code.
+- `item_order`: a module other than `mod tests;` is a `#[cfg(test)]` module by the same cfg
+  rule, declared or inline, gated outside (`#[cfg(test)] mod m { .. }`) or inside
+  (`mod m { #![cfg(test)] .. }`); one with no such gate, an inline `mod tests { .. }`
+  included, is a mod declaration or code. Other `#[cfg(test)]` items stay code.
+- `item_order`: a `mod x;` whose file starts with `#![cfg(test)]` is not known as test-gated:
+  the check reads one file at a time, so it stays a mod declaration.
 - `item_order`: also a `mod tests;` whose cfg attributes are not exactly one `#[cfg(test)]`;
   further conditions, a second stacked `#[cfg(..)]` included, go inside `tests.rs`.
 - `emoji`: a VS16, an emoji joined on with U+200D (a skin tone included) and a flag's second
@@ -136,6 +143,38 @@ Rust sources are found the way the compiler finds them, not by listing directori
 - `emoji`: a VS15 right after a character that is an emoji on its own, such as U+2614 or
   U+1F44D, asks for its text form, so that character is not reported.
 - `emoji`: a skin tone or a flag letter has no text form, so a VS15 after one changes nothing.
+- `library_subscriber`: flags, in the library code of a package without a binary target that
+  lists a configured subscriber crate as a regular dependency, each `.init()` and
+  `.try_init()` method call and each function call whose last path segment is `init`,
+  `try_init`, `set_global_default` or `set_default`, at that name.
+- `library_subscriber`: the dependency, renamed or not, target-specific or not, only turns the
+  check on; dev and build dependencies do not. Building layers or subscribers is fine.
+- `library_subscriber`: library code is what a library target reaches through `mod`
+  declarations none of which requires `test` by the `item_order` cfg rule, inline modules and
+  a file's own `#![cfg(test)]` included; a file only a `#[cfg_attr(test, path = "..")]` path
+  reaches is not. A file any such route reaches is library code, whichever package owns it:
+  a library that reaches another package's file through `#[path]` gets it checked too.
+- `library_subscriber`: test code may install one: a call under a cfg that requires `test`
+  or inside a test function, one with an attribute whose path ends in `test` (`#[test]`,
+  `#[tokio::test]`, `#[test_log::test]`), a file only test-only declarations reach
+  (`#[cfg(test)] mod tests;` leads to `tests.rs` and everything below it), and the test,
+  bench, example and build script targets.
+- `library_subscriber`: matched by name, with no type information, so any call so named
+  counts, such as the library's own `init()` or `Config::set_default()`; a call inside a
+  macro body is not seen.
+- `path_attr`: `#[path]` overrides the file-name-to-module mapping, so the module tree stops
+  mirroring the file system.
+- `path_attr`: outer and inner, also inside `cfg_attr(..)`, nested
+  (`cfg_attr(a, cfg_attr(b, path = ".."))`) or beside other attributes; whatever item it
+  sits on, in every file samlinter reads, under `src/` or `tests/` alike. The key also
+  counts in its raw-identifier spelling, `r#path`.
+- `path_attr`: one finding per `path = ..`, at its `path` key, so two in one `cfg_attr` are
+  two findings. A `path` attribute inside a macro body is not seen.
+- `path_attr`: it only reports: the module walk still follows every `path` attribute as
+  described above.
+- `path_attr`: exempted on the item that carries the attribute. An inner `#![path]` is
+  exempted by an expect on the node it sits on: an outer expect on the enclosing inline
+  module, or an inner expect at the top of that module or of the file.
 
 The comment rules read every comment, doc comments included, also inside macro bodies.
 They read the `#` comments of every `Cargo.toml` samlinter checks and of `samlinter.toml`
@@ -150,7 +189,6 @@ Cargo manifests:
 | `feature_flags` | a `[features]` table, or a dependency with `optional = true`, which cargo turns into a feature |
 | `panic_strategy` | a root manifest whose `[profile.dev]` or `[profile.release]` is missing or does not set `panic = "abort"` |
 | `binary_readme` | a package with a binary target and no `README.md` in its package directory |
-| `library_subscriber` | a package without a binary target with a configured subscriber crate as a regular dependency, renamed or not; dev and build dependencies may use one |
 
 - `binary_readme`: `README.md` follows the same nothing-there rule as module files; a
   `README.md` directory is an error.
@@ -164,9 +202,11 @@ Always on:
 - `syntax_error`: a file that does not parse is reported, never half-linted.
 - `malformed_exemption` and `unfulfilled_exemption`: see Exemptions.
 
-Limits: no type information. Macro bodies are token trees: only the comment rules look inside
-them. Nesting is tested to 5000 levels of parentheses and inline modules, and to 20000 inline
-modules in a file with a syntax error; deeper or other nesting may abort with a stack overflow.
+Limits: no type information, so `library_subscriber` flags any call named `init`, `try_init`,
+`set_global_default` or `set_default` in such a library. Macro bodies are token trees: only
+the comment rules look inside them. Nesting is tested to 5000 levels of parentheses and
+inline modules, and to 20000 inline modules in a file with a syntax error; deeper or other
+nesting may abort with a stack overflow.
 A file whose syntax tree is more than 1000 levels deep keeps that tree in memory until
 samlinter exits. The parser's time grows quadratically with nested parentheses: 8000 levels
 take about 5 s in a debug build.
@@ -189,9 +229,10 @@ exclude = ["src/generated", "build/bindings.rs"]
   blank line or code between them ends the run. A finding points at the phrase's first
   character.
 - Entries in every list must be non-empty, with no surrounding whitespace.
-- `subscriber-crates`: crates that install a log subscriber; a package without a binary target
-  may list them only as dev or build dependencies. As on crates.io, `-` and `_` in a name
-  match each other.
+- `subscriber-crates`: crates that install a log subscriber. A package without a binary target
+  that lists one as a regular dependency gets its library code checked for install calls
+  (`library_subscriber`); the dependency alone is no finding. As on crates.io, `-` and `_` in
+  a name match each other.
 - `exclude`: optional, default empty. Files and directories every rule is silenced for; it is
   for generated code, never for silencing a finding in code people write.
   - Each entry is a path relative to the workspace root, written with `/`, naming a file or
@@ -211,10 +252,19 @@ Nothing in the file disables a rule.
 
 ## Exemptions
 
-Only `rest_pattern` and `member_version` accept exemptions, and each one needs a reason.
-Each is exempted in the kind of file its findings appear in: `rest_pattern` in Rust,
-`member_version` in a member `Cargo.toml`. An exemption naming a rule in the other kind of
-file, or a rule that accepts none, is a `malformed_exemption`.
+Every exemption needs a reason, and is written in the kind of file its findings appear in:
+
+- Rust: every rule with findings in Rust source, `rest_pattern`, `restricted_visibility`,
+  `item_order`, `item_spacing`, `fn_spacing`, `em_dash`, `emoji`, `forbidden_word`,
+  `library_subscriber` and `path_attr`, on the node that holds the finding. A comment that belongs to no node
+  cannot be exempted (see below).
+- A member `Cargo.toml`: `member_version`.
+- Nowhere: `syntax_error`, `malformed_exemption`, `unfulfilled_exemption` and the other
+  Cargo.toml rules. Comment findings in `Cargo.toml`, `samlinter.toml` and README files
+  cannot be exempted either: no attribute can sit there.
+
+An exemption naming a rule in the other kind of file, or a rule that accepts none, is a
+`malformed_exemption`.
 
 In Rust, put the attribute on the item, field, match arm, statement or parameter that holds
 the violation:
@@ -226,6 +276,11 @@ let vendor::Config { timeout, .. } = config;
 
 - Nothing ever sets the `samlinter` cfg, so the compiler drops the attribute. It is valid on
   stable Rust in every attribute position.
+- It covers the node's own text. An item or a field also owns its doc comments and the plain
+  comments directly above it. A `let` statement, a match arm or a parameter does not own the
+  plain comment above it, and a comment after a node on its last line is outside it.
+- A file's `//!` docs, a comment a blank line apart from the next item and comments after the
+  last item belong to no node, so no exemption reaches them: rewrite the comment.
 - Stable Rust accepts no attribute on an assignment, so a destructuring assignment such as
   `(a, ..) = t;` cannot carry one. Put the exemption on a block around it,
   `#[cfg_attr(..)] { (a, ..) = t; }`, or on the enclosing function.

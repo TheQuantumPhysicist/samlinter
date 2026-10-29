@@ -5,7 +5,6 @@ mod ownership;
 
 use crate::config::{Config, Settings};
 use anyhow::{Context, Result, anyhow, bail};
-use cargo_metadata::cargo_platform::Platform;
 use cargo_metadata::{DependencyKind, Metadata, MetadataCommand, TargetKind};
 pub use lookup::Excluded;
 use lookup::{Disk, FileAt, Files, Looked, lexical, look, relative};
@@ -52,6 +51,46 @@ pub struct Package {
     /// The files this package owns among its target roots and the files their `mod`
     /// declarations reach, ordered by path.
     pub sources: Vec<TextFile>,
+    /// - Every file this package reaches as library code (`Reach::Library`), by path, whichever
+    ///   package owns it.
+    /// - A file another package owns can still be this library's code, through `#[path]`.
+    pub library_code: BTreeSet<PathBuf>,
+}
+
+/// A Rust source file the module walk reached, and what its code is to the package's library.
+struct Source {
+    file: TextFile,
+    reach: Reach,
+}
+
+/// Whether a source file's code can end up in its package's library.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    /// Reached from a library target through `mod` declarations none of which requires `test`.
+    Library,
+    /// Reached only through `mod` declarations that require `test`, or only from other targets:
+    /// binaries, tests, benches, examples, the build script.
+    NotLibrary,
+}
+
+impl Reach {
+    /// What the module a declaration of reach `declaration` names is, in a file of reach `self`.
+    const fn through(self, declaration: Self) -> Self {
+        match (self, declaration) {
+            (Self::Library, Self::Library) => Self::Library,
+            (Self::Library, Self::NotLibrary)
+            | (Self::NotLibrary, Self::Library | Self::NotLibrary) => Self::NotLibrary,
+        }
+    }
+
+    /// A file two routes reach is library code when either route is.
+    const fn either(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Library, Self::Library | Self::NotLibrary)
+            | (Self::NotLibrary, Self::Library) => Self::Library,
+            (Self::NotLibrary, Self::NotLibrary) => Self::NotLibrary,
+        }
+    }
 }
 
 /// The `README.md` beside the package's manifest.
@@ -73,13 +112,10 @@ pub enum PackageKind {
 /// A dependency as `cargo metadata` resolves it, renames inherited from
 /// `[workspace.dependencies]` included.
 pub struct Dependency {
-    /// The key it is declared under.
-    pub key: String,
     /// The crate it names after any `package = "..."` rename.
     pub crate_name: String,
+    /// A `[target.<platform>]` table's dependency is in the section of the table's name.
     pub section: Section,
-    /// The platform of the `[target.<platform>]` table it is declared under.
-    pub target: Option<Platform>,
 }
 
 /// A dependency table, named as Cargo.toml spells it; cargo accepts the underscore
@@ -158,8 +194,14 @@ struct PackageMetadata {
     kind: PackageKind,
     edition: Edition,
     dependencies: Vec<Dependency>,
-    /// Every target's root file.
-    roots: Vec<PathBuf>,
+    targets: Vec<Target>,
+}
+
+/// One cargo target as discovery walks it.
+struct Target {
+    root: PathBuf,
+    /// What the target's own code is to the library.
+    reach: Reach,
 }
 
 /// - One way the module tree reaches a file; the file's `mod` declarations resolve against it.
@@ -187,8 +229,8 @@ impl Route {
     }
 }
 
-/// Source files read so far, by the route that reached each.
-type Sources = BTreeMap<Route, TextFile>;
+/// Source files read so far, by the route that reached each, with the reach of that route.
+type Sources = BTreeMap<Route, Source>;
 
 /// What one package's module walk has found so far.
 #[derive(Default)]
@@ -213,7 +255,7 @@ struct Reached {
     /// - Read only after every package's module walk, so module errors come first.
     manifest: Looked,
     /// The source files it reaches.
-    sources: Vec<TextFile>,
+    sources: Vec<Source>,
 }
 
 /// One package once ownership is decided, before it becomes a `Package`.
@@ -223,6 +265,8 @@ struct Owned {
     manifest: Looked,
     /// The reached source files it owns.
     sources: Vec<TextFile>,
+    /// As `Package.library_code`.
+    library_code: BTreeSet<PathBuf>,
 }
 
 /// Each package by its manifest path, lexically normalized.
@@ -268,10 +312,13 @@ fn package_metadata(root_dir: &Path, package: &cargo_metadata::Package) -> Resul
         kind: package_kind(package),
         edition,
         dependencies,
-        roots: package
+        targets: package
             .targets
             .iter()
-            .map(|target| target.src_path.as_std_path().to_path_buf())
+            .map(|target| Target {
+                root: target.src_path.as_std_path().to_path_buf(),
+                reach: target_reach(&target.kind),
+            })
             .collect(),
         manifest_path,
     })
@@ -358,10 +405,10 @@ fn reached_sources(
         manifest
         @ (Looked::File(_) | Looked::Directory(_) | Looked::Neither | Looked::Excluded) => {
             let tree = package
-                .roots
+                .targets
                 .iter()
-                .try_fold(Tree::default(), |tree, root| {
-                    target_root(files, root_dir, package.edition, excluded, tree, root)
+                .try_fold(Tree::default(), |tree, target| {
+                    target_root(files, root_dir, package.edition, excluded, tree, target)
                 })?;
             Ok(PackageWalk::Reached {
                 package: Reached {
@@ -375,15 +422,16 @@ fn reached_sources(
     }
 }
 
-/// `tree` plus every file the target root cargo reports at `written` reaches.
+/// `tree` plus every file the target root cargo reports for `target` reaches.
 fn target_root(
     files: &impl Files,
     root_dir: &Path,
     edition: Edition,
     excluded: &Excluded,
     tree: Tree,
-    written: &Path,
+    target: &Target,
 ) -> Result<Tree> {
+    let written = &target.root;
     match look(files, root_dir, excluded, written)? {
         Looked::File(file) => module_tree(
             files,
@@ -391,8 +439,11 @@ fn target_root(
             edition,
             excluded,
             tree,
-            file,
-            FileKind::ModRs,
+            Child {
+                file,
+                kind: FileKind::ModRs,
+                reach: target.reach,
+            },
         ),
         Looked::Excluded => Ok(tree),
         Looked::AboveLinkedRoot => Ok(tree.warned(Warning::Cargo {
@@ -449,6 +500,7 @@ fn load_package(files: &impl Files, root_dir: &Path, owned: Owned) -> Result<Pac
         metadata,
         manifest,
         sources,
+        library_code,
     } = owned;
     let manifest = read_looked(files, root_dir, &metadata.manifest_path, manifest)?;
     let dir = manifest.path.parent().with_context(|| {
@@ -464,6 +516,7 @@ fn load_package(files: &impl Files, root_dir: &Path, owned: Owned) -> Result<Pac
         edition: metadata.edition,
         dependencies: metadata.dependencies,
         sources,
+        library_code,
     })
 }
 
@@ -481,12 +534,24 @@ fn config(files: &impl Files, root_dir: &Path) -> Result<TextFile> {
         })
 }
 
-/// A file several routes reach is linted once, ordered by its path.
-fn one_per_file(sources: Sources) -> Vec<TextFile> {
-    let by_path: BTreeMap<PathBuf, TextFile> = sources
-        .into_values()
-        .map(|source| (source.path.clone(), source))
-        .collect();
+/// A file several routes reach is linted once, ordered by its path, as library code when any
+/// route reaches it as such.
+fn one_per_file(sources: Sources) -> Vec<Source> {
+    let by_path =
+        sources
+            .into_values()
+            .fold(BTreeMap::<PathBuf, Source>::new(), |mut by_path, source| {
+                match by_path.entry(source.file.path.clone()) {
+                    Entry::Vacant(slot) => {
+                        slot.insert(source);
+                    }
+                    Entry::Occupied(mut slot) => {
+                        let kept = slot.get_mut();
+                        kept.reach = kept.reach.either(source.reach);
+                    }
+                }
+                by_path
+            });
     by_path.into_values().collect()
 }
 
@@ -499,27 +564,56 @@ fn edition(manifest_path: &Path, edition: &str) -> Result<Edition> {
     })
 }
 
-/// `tree` plus `file` and every file its `mod` declarations reach along this route.
+/// - `tree` plus the `child` file and every file its `mod` declarations reach along this route.
+/// - A route followed only as `Reach::NotLibrary` so far is followed again as library code
+///   when a library route reaches it, so the files below it become library code too.
 fn module_tree(
     files: &impl Files,
     root_dir: &Path,
     edition: Edition,
     excluded: &Excluded,
     tree: Tree,
-    file: FileAt,
-    kind: FileKind,
+    child: Child,
 ) -> Result<Tree> {
     let Tree {
         mut sources,
         warnings,
     } = tree;
+    let Child { file, kind, reach } = child;
     let children = match sources.entry(Route::of(root_dir, file.path(), kind)?) {
-        // Followed already, along with the files below it.
-        Entry::Occupied(_) => Children::default(),
+        Entry::Occupied(mut slot) => match (slot.get().reach, reach) {
+            // Followed already, along with the files below it.
+            (Reach::Library, Reach::Library | Reach::NotLibrary)
+            | (Reach::NotLibrary, Reach::NotLibrary) => Children::default(),
+            (Reach::NotLibrary, Reach::Library) => {
+                slot.get_mut().reach = Reach::Library;
+                let route = slot.key();
+                child_files(
+                    files,
+                    root_dir,
+                    excluded,
+                    route,
+                    &slot.get().file,
+                    edition,
+                    reach,
+                )?
+            }
+        },
         Entry::Vacant(slot) => {
             let source = read_file(files, root_dir, file)?;
-            let children = child_files(files, root_dir, excluded, slot.key(), &source, edition)?;
-            slot.insert(source);
+            let children = child_files(
+                files,
+                root_dir,
+                excluded,
+                slot.key(),
+                &source,
+                edition,
+                reach,
+            )?;
+            slot.insert(Source {
+                file: source,
+                reach,
+            });
             children
         }
     };
@@ -528,12 +622,9 @@ fn module_tree(
         sources,
         warnings: warnings.into_iter().chain(children.warnings).collect(),
     };
-    children
-        .found
-        .into_iter()
-        .try_fold(tree, |tree, Child { file, kind }| {
-            module_tree(files, root_dir, edition, excluded, tree, file, kind)
-        })
+    children.found.into_iter().try_fold(tree, |tree, child| {
+        module_tree(files, root_dir, edition, excluded, tree, child)
+    })
 }
 
 /// What the `mod` declarations of one file lead to.
@@ -587,7 +678,8 @@ impl Children {
     }
 }
 
-/// The files the `mod` declarations in `source` name, every existing candidate of each.
+/// - The files the `mod` declarations in `source` name, every existing candidate of each.
+/// - `reach` is the route's; each child's is that through its declaration.
 fn child_files(
     files: &impl Files,
     root_dir: &Path,
@@ -595,6 +687,7 @@ fn child_files(
     route: &Route,
     source: &TextFile,
     edition: Edition,
+    reach: Reach,
 ) -> Result<Children> {
     let shown = &source.shown;
     let declarations = modules::declarations(&source.text, edition).map_err(|bad| {
@@ -608,17 +701,19 @@ fn child_files(
     declarations
         .iter()
         .try_fold(Children::default(), |children, declaration| {
-            let resolution = look_up(files, root_dir, excluded, route, declaration)?
+            let resolution = look_up(files, root_dir, excluded, route, declaration, reach)?
                 .into_iter()
                 .fold(Resolution::Missing(Vec::new()), Resolution::with);
             children.with(root_dir, shown, declaration, resolution)
         })
 }
 
-/// A file a `mod` declaration names, found by `look`.
+/// A file a target or a `mod` declaration names, found by `look`.
 struct Child {
     file: FileAt,
     kind: FileKind,
+    /// The reach of the route through it.
+    reach: Reach,
 }
 
 /// One candidate file of a `mod` declaration, once looked up.
@@ -671,14 +766,16 @@ impl Resolution {
     }
 }
 
-/// Each candidate file of `declaration`, found along `route`, looked up.
+/// Each candidate file of `declaration`, found along `route` of reach `reach`, looked up.
 fn look_up(
     files: &impl Files,
     root_dir: &Path,
     excluded: &Excluded,
     route: &Route,
     declaration: &Declaration,
+    reach: Reach,
 ) -> Result<Vec<Lookup>> {
+    let reach = reach.through(declaration.reach);
     let candidates =
         modules::candidates(&route.dir, &route.name, route.kind, declaration, |dir| {
             Ok(match look(files, root_dir, excluded, dir)? {
@@ -689,9 +786,18 @@ fn look_up(
         })?;
     candidates
         .into_iter()
-        .map(|Candidate { path, kind }| {
+        .map(|candidate| {
+            let Candidate {
+                path,
+                kind,
+                reach: location,
+            } = candidate;
             Ok(match look(files, root_dir, excluded, &path)? {
-                Looked::File(file) => Lookup::Found(Child { file, kind }),
+                Looked::File(file) => Lookup::Found(Child {
+                    file,
+                    kind,
+                    reach: reach.through(location),
+                }),
                 Looked::Directory(_) | Looked::Neither => Lookup::Missing(path),
                 Looked::Excluded => Lookup::Excluded,
                 Looked::AboveLinkedRoot => Lookup::AboveLinkedRoot,
@@ -721,13 +827,8 @@ fn dependency(dependency: &cargo_metadata::Dependency) -> Result<Dependency> {
         )
     })?;
     Ok(Dependency {
-        key: dependency
-            .rename
-            .clone()
-            .unwrap_or_else(|| dependency.name.clone()),
         crate_name: dependency.name.clone(),
         section,
-        target: dependency.target.clone(),
     })
 }
 
@@ -738,6 +839,35 @@ const fn section(kind: DependencyKind) -> Option<Section> {
         DependencyKind::Development => Some(Section::Development),
         DependencyKind::Build => Some(Section::Build),
         DependencyKind::Unknown => None,
+    }
+}
+
+/// A library target's code is library code; any other target's is not.
+fn target_reach(kinds: &[TargetKind]) -> Reach {
+    if kinds.iter().any(is_library_kind) {
+        Reach::Library
+    } else {
+        Reach::NotLibrary
+    }
+}
+
+const fn is_library_kind(kind: &TargetKind) -> bool {
+    match kind {
+        TargetKind::Bin
+        | TargetKind::Example
+        | TargetKind::Test
+        | TargetKind::Bench
+        | TargetKind::CustomBuild => false,
+        // `#[non_exhaustive]`: the wildcard absorbs kinds newer than this cargo_metadata, read
+        // as library code like `Unknown`, so a new kind never hides a finding.
+        TargetKind::Lib
+        | TargetKind::RLib
+        | TargetKind::DyLib
+        | TargetKind::CDyLib
+        | TargetKind::StaticLib
+        | TargetKind::ProcMacro
+        | TargetKind::Unknown(_)
+        | _ => true,
     }
 }
 

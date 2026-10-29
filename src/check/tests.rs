@@ -5,6 +5,7 @@ use crate::workspace::{
 };
 use ra_ap_syntax::Edition;
 use rstest::rstest;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 const PROSE: &str = "# lib\n\nSee NOTES.md \u{2014} done \u{1F389}\n";
@@ -36,6 +37,7 @@ fn package(dir: &str, kind: PackageKind, source: &str) -> Package {
         edition: Edition::Edition2024,
         dependencies: Vec::new(),
         sources: vec![text_file(&format!("{dir}{source_name}"), source)],
+        library_code: BTreeSet::new(),
     }
 }
 
@@ -58,6 +60,7 @@ fn workspace(edition: Edition, source: &str) -> Workspace {
             edition,
             dependencies: Vec::new(),
             sources: vec![text_file("lib/src/lib.rs", source)],
+            library_code: BTreeSet::new(),
         }],
     }
 }
@@ -258,27 +261,77 @@ fn root_package_readme_is_checked_for_prose() {
     );
 }
 
-#[test]
-fn dependency_missing_from_its_manifest_stops_the_run() {
-    let member = Package {
+const INSTALL: &str = "fn f(s: S) {\n    s.init();\n}\n";
+
+/// - Library members `lib`, which lists a subscriber crate as a regular dependency, and `member`,
+///   which does not.
+/// - Each owns its `src/lib.rs`, holding `INSTALL`; `member` also owns `member/src/helper.rs`.
+/// - `lib_code` and `member_code` are the files, as output shows them, each reaches as library
+///   code.
+fn subscriber_workspace(lib_code: &[&str], member_code: &[&str]) -> Workspace {
+    let workspace = workspace(Edition::Edition2024, "");
+    let code = |shown: &[&str]| -> BTreeSet<PathBuf> {
+        shown
+            .iter()
+            .map(|shown| text_file(shown, "").path)
+            .collect()
+    };
+    let lib = Package {
+        manifest: text_file("lib/Cargo.toml", "[package]\nname = \"lib\"\n"),
+        kind: PackageKind::Library,
+        readme: missing("lib/README.md"),
+        edition: Edition::Edition2024,
         dependencies: vec![Dependency {
-            key: "logs".to_owned(),
             crate_name: "tracing-subscriber".to_owned(),
             section: Section::Normal,
-            target: None,
         }],
-        ..package("member/", PackageKind::Library, "")
+        sources: vec![text_file("lib/src/lib.rs", INSTALL)],
+        library_code: code(lib_code),
     };
-    let workspace = Workspace {
-        members: vec![member],
+    let member = Package {
+        manifest: text_file("member/Cargo.toml", "[package]\nname = \"member\"\n"),
+        readme: missing("member/README.md"),
+        dependencies: Vec::new(),
+        sources: vec![
+            text_file("member/src/helper.rs", INSTALL),
+            text_file("member/src/lib.rs", INSTALL),
+        ],
+        library_code: code(member_code),
+        kind: PackageKind::Library,
+        edition: Edition::Edition2024,
+    };
+    Workspace {
+        members: vec![lib, member],
         settings: Config {
             subscriber_crates: words(&["tracing-subscriber"]),
             ..config()
         },
-        ..workspace(Edition::Edition2024, "")
-    };
+        ..workspace
+    }
+}
+
+#[rstest]
+#[case::own_library_code(
+    &["lib/src/lib.rs"],
+    &["member/src/helper.rs", "member/src/lib.rs"],
+    &["lib/src/lib.rs:2:7: library_subscriber: library installs a log subscriber: `.init()`"]
+)]
+#[case::own_test_code(&[], &["member/src/helper.rs", "member/src/lib.rs"], &[])]
+#[case::library_code_another_package_owns(
+    &["lib/src/lib.rs", "member/src/helper.rs"],
+    &["member/src/helper.rs", "member/src/lib.rs"],
+    &[
+        "lib/src/lib.rs:2:7: library_subscriber: library installs a log subscriber: `.init()`",
+        "member/src/helper.rs:2:7: library_subscriber: library installs a log subscriber: `.init()`",
+    ]
+)]
+fn library_code_may_not_install_a_subscriber(
+    #[case] lib_code: &[&str],
+    #[case] member_code: &[&str],
+    #[case] expected: &[&str],
+) {
     assert_eq!(
-        run(&workspace).unwrap_err().to_string(),
-        "member/Cargo.toml: `cargo metadata` lists dependency `logs`, but samlinter finds no entry for it in this file; please report this samlinter bug"
+        lines(&subscriber_workspace(lib_code, member_code)),
+        expected
     );
 }

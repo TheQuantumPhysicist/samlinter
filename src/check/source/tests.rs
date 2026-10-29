@@ -1,25 +1,30 @@
 use super::super::text_file;
-use super::check;
+use super::{Installs, check};
 use crate::config::{Config, words};
 use ra_ap_syntax::Edition;
 use rstest::rstest;
 
 const PHRASE: &str = "it is worth noting";
 
-fn findings_in(edition: Edition, text: &str) -> Vec<String> {
+fn findings_in(edition: Edition, installs: Installs, text: &str) -> Vec<String> {
     let file = text_file("src/lib.rs", text);
     let config = Config {
         forbidden_words: words(&["NOTES.md", PHRASE]),
         subscriber_crates: Vec::new(),
     };
-    check(&file, edition, &config)
+    check(&file, edition, &config, installs)
         .iter()
         .map(ToString::to_string)
         .collect()
 }
 
 fn findings(text: &str) -> Vec<String> {
-    findings_in(Edition::Edition2024, text)
+    findings_in(Edition::Edition2024, Installs::Allowed, text)
+}
+
+/// `findings` in library code that may not install a log subscriber.
+fn library_findings(text: &str) -> Vec<String> {
+    findings_in(Edition::Edition2024, Installs::Flagged, text)
 }
 
 #[rstest]
@@ -150,7 +155,11 @@ fn reads_line_endings_and_byte_order_mark_as_rustc_does(
 )]
 fn parses_with_the_package_edition(#[case] edition: Edition, #[case] expected: &[&str]) {
     assert_eq!(
-        findings_in(edition, "fn f() {\n    let gen = 1;\n}\n"),
+        findings_in(
+            edition,
+            Installs::Allowed,
+            "fn f() {\n    let gen = 1;\n}\n"
+        ),
         expected
     );
 }
@@ -162,6 +171,179 @@ fn each_syntax_error_is_one_finding() {
         [
             "src/lib.rs:2:9: syntax_error: expected pattern",
             "src/lib.rs:3:9: syntax_error: expected pattern",
+        ]
+    );
+}
+
+/// `text` with `ATTR` replaced by an exemption for `rule`.
+fn exempting(rule: &str, text: &str) -> String {
+    text.replace(
+        "ATTR",
+        &format!("#[cfg_attr(samlinter, expect({rule}, reason = \"why\"))]"),
+    )
+}
+
+#[rstest]
+#[case::rest_pattern("rest_pattern", "ATTR\nfn f(v: V) {\n    let V { a, .. } = v;\n}\n")]
+#[case::restricted_visibility("restricted_visibility", "ATTR\npub(crate) fn f() {}\n")]
+#[case::item_order("item_order", "fn f() {}\n\nATTR\nuse std::io;\n")]
+#[case::item_spacing("item_spacing", "use std::fmt;\n\nATTR\nuse std::io;\n")]
+#[case::fn_spacing("fn_spacing", "fn f() {}\nATTR\nfn g() {}\n")]
+#[case::em_dash("em_dash", "ATTR\nfn f() {\n    // a \u{2014} b\n}\n")]
+#[case::emoji("emoji", "ATTR\nfn f() {\n    // done \u{1F389}\n}\n")]
+#[case::forbidden_word("forbidden_word", "ATTR\nfn f() {\n    // see NOTES.md\n}\n")]
+#[case::forbidden_word_in_the_doc_comment("forbidden_word", "/// see NOTES.md\nATTR\nfn f() {}\n")]
+#[case::em_dash_in_the_doc_comment("em_dash", "/// a \u{2014} b\nATTR\nfn f() {}\n")]
+#[case::forbidden_word_in_the_plain_comment_above(
+    "forbidden_word",
+    "// see NOTES.md\nATTR\nfn f() {}\n"
+)]
+#[case::library_subscriber("library_subscriber", "fn f(s: S) {\n    ATTR\n    s.init();\n}\n")]
+#[case::path_attr("path_attr", "ATTR\n#[path = \"sys_unix.rs\"]\nmod sys;\n")]
+#[case::path_attr_in_a_cfg_attr(
+    "path_attr",
+    "ATTR\n#[cfg_attr(unix, path = \"sys_unix.rs\")]\nmod sys;\n"
+)]
+#[case::inner_path_attr_on_its_inline_module(
+    "path_attr",
+    "ATTR\nmod m {\n    #![path = \"d\"]\n    mod n;\n}\n"
+)]
+fn exemption_lifts_each_rust_source_rule(#[case] rule: &str, #[case] text: &str) {
+    assert_eq!(
+        library_findings(&exempting(rule, text)),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+#[case::rest_pattern("rest_pattern")]
+#[case::restricted_visibility("restricted_visibility")]
+#[case::item_order("item_order")]
+#[case::item_spacing("item_spacing")]
+#[case::fn_spacing("fn_spacing")]
+#[case::em_dash("em_dash")]
+#[case::emoji("emoji")]
+#[case::forbidden_word("forbidden_word")]
+#[case::library_subscriber("library_subscriber")]
+#[case::path_attr("path_attr")]
+fn exemption_matching_nothing_is_unfulfilled(#[case] rule: &str) {
+    assert_eq!(
+        library_findings(&exempting(rule, "ATTR\nfn f() {}\n")),
+        [format!(
+            "src/lib.rs:1:1: unfulfilled_exemption: exemption for `{rule}` matches nothing here"
+        )]
+    );
+}
+
+/// Each finding as `line:column rule`.
+fn placed(text: &str) -> Vec<String> {
+    findings(text)
+        .iter()
+        .filter_map(|line| {
+            let mut parts = line.strip_prefix("src/lib.rs:")?.splitn(4, ':');
+            let (row, column, rule) = (parts.next()?, parts.next()?, parts.next()?);
+            Some(format!("{row}:{column}{rule}"))
+        })
+        .collect()
+}
+
+/// - The parser files doc comments and the plain comments directly above an item or a field
+///   under that node, so its exemption covers them.
+/// - A plain comment above a `let`, a match arm or a parameter sits outside it, and a file's
+///   `//!` docs, a comment a blank line apart from the next item and one after the last item
+///   belong to no node: no exemption reaches them.
+#[rstest]
+#[case::doc_comment_of_a_field(
+    "struct S {\n    /// see NOTES.md\n    ATTR\n    a: u8,\n}\n",
+    &[]
+)]
+#[case::plain_comment_above_a_field(
+    "struct S {\n    // see NOTES.md\n    ATTR\n    a: u8,\n}\n",
+    &[]
+)]
+#[case::plain_comment_above_a_let(
+    "fn f() {\n    // see NOTES.md\n    ATTR\n    let a = 1;\n}\n",
+    &["2:12 forbidden_word", "3:5 unfulfilled_exemption"]
+)]
+#[case::plain_comment_above_a_match_arm(
+    "fn f(e: E) {\n    match e {\n        // see NOTES.md\n        ATTR\n        E::A => {}\n    }\n}\n",
+    &["3:16 forbidden_word", "4:9 unfulfilled_exemption"]
+)]
+#[case::file_docs(
+    "//! see NOTES.md\n\nATTR\nfn f() {}\n",
+    &["1:9 forbidden_word", "3:1 unfulfilled_exemption"]
+)]
+#[case::comment_a_blank_line_apart(
+    "// see NOTES.md\n\nATTR\nfn f() {}\n",
+    &["1:8 forbidden_word", "3:1 unfulfilled_exemption"]
+)]
+#[case::comment_after_the_last_item(
+    "ATTR\nfn f() {}\n\n// see NOTES.md\n",
+    &["4:8 forbidden_word", "1:1 unfulfilled_exemption"]
+)]
+fn exemption_covers_the_comments_its_node_owns(#[case] text: &str, #[case] expected: &[&str]) {
+    assert_eq!(placed(&exempting("forbidden_word", text)), expected);
+}
+
+/// - An outer exemption sits on an item, and a file top is no item: an expect on the first
+///   item neither covers a file-top `#![path]` nor goes away.
+/// - The covering form is an inner expect at the top of the same file.
+#[test]
+fn file_top_path_attribute_is_not_covered_by_an_expect_on_an_item() {
+    assert_eq!(
+        placed(&exempting(
+            "path_attr",
+            "#![path = \"x\"]\n\nATTR\nfn f() {}\n"
+        )),
+        ["1:4 path_attr", "3:1 unfulfilled_exemption"]
+    );
+}
+
+/// A file-top `#![path]` is exempted by an inner expect at the top of the same file, on the
+/// same node, like an inline module's inner expect owns its inner `#![path]`.
+#[test]
+fn file_top_path_attribute_is_exempted_by_an_inner_expect() {
+    assert_eq!(
+        placed(
+            "#![path = \"x\"]\n#![cfg_attr(samlinter, expect(path_attr, reason = \"why\"))]\nfn f() {}\n"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// An inner expect at the top of an inline module covers its inner `#![path]`, like an
+/// outer expect on that module does.
+#[test]
+fn inner_path_attribute_is_exempted_at_the_top_of_its_inline_module() {
+    assert_eq!(
+        placed(
+            "mod m {\n    #![cfg_attr(samlinter, expect(path_attr, reason = \"why\"))]\n    #![path = \"d\"]\n    mod n;\n}\n"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// An inner expect is valid at the top of a file even when nothing there matches: an
+/// unfulfilled exemption, not a malformed one.
+#[test]
+fn stray_inner_exemption_at_the_file_top_is_unfulfilled() {
+    assert_eq!(
+        placed("#![cfg_attr(samlinter, expect(path_attr, reason = \"why\"))]\nfn f() {}\n"),
+        ["1:1 unfulfilled_exemption"]
+    );
+}
+
+/// A comment after the item on its last line is outside the item's node.
+#[test]
+fn exemption_misses_a_trailing_comment_after_its_node() {
+    assert_eq!(
+        findings(&exempting(
+            "forbidden_word",
+            "ATTR\nfn f() {} // see NOTES.md\n"
+        )),
+        [
+            "src/lib.rs:2:18: forbidden_word: `NOTES.md` is listed in forbidden-words in samlinter.toml",
+            "src/lib.rs:1:1: unfulfilled_exemption: exemption for `forbidden_word` matches nothing here",
         ]
     );
 }

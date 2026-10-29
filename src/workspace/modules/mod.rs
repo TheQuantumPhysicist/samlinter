@@ -1,4 +1,6 @@
+use super::Reach;
 use crate::finding::Position;
+use crate::syntax::{is_test_gated, is_test_module, path_value, requires_test};
 use anyhow::Result;
 use ra_ap_syntax::ast::{self, HasAttrs, HasModuleItem, HasName};
 use ra_ap_syntax::{AstNode, Edition, TextSize};
@@ -19,6 +21,8 @@ pub enum FileKind {
 pub struct Candidate {
     pub path: PathBuf,
     pub kind: FileKind,
+    /// `Reach::NotLibrary` when only `cfg_attr` paths whose cfg requires `test` lead here.
+    pub reach: Reach,
 }
 
 /// What the lookup `candidates` is given finds at an inline module's written directory.
@@ -40,6 +44,9 @@ pub struct Declaration {
     /// The inline `mod m { .. }` blocks around it, outermost first.
     pub inline: Vec<Module>,
     pub module: Module,
+    /// `Reach::NotLibrary` when it, an inline module around it or its file requires `test`
+    /// (`syntax::is_test_module`).
+    pub reach: Reach,
 }
 
 /// A `mod` item's name and the `path` attributes that can place it.
@@ -57,15 +64,23 @@ enum Paths {
     /// No unconditional `path` yet, so a later attribute may still add one.
     Open {
         /// `#[cfg_attr(.., path = "..")]` values so far, each one more possible location.
-        conditional: Vec<String>,
+        conditional: Vec<Conditional>,
     },
     /// Ended by the first unconditional `path`.
     Fixed {
         /// The `#[path = ".."]` value, which replaces the default location.
         fixed: String,
         /// `#[cfg_attr(.., path = "..")]` values before it, each one more possible location.
-        conditional: Vec<String>,
+        conditional: Vec<Conditional>,
     },
+}
+
+/// A `#[cfg_attr(.., path = "..")]` value.
+#[derive(Clone, Debug)]
+struct Conditional {
+    path: String,
+    /// `Reach::NotLibrary` when the cfg, or one around it, requires `test`.
+    reach: Reach,
 }
 
 /// One place a module may be.
@@ -73,8 +88,8 @@ enum Paths {
 enum Location<'a> {
     /// Named after the module.
     Default,
-    /// A `path` attribute's value.
-    Path(&'a str),
+    /// A `path` attribute's value, `Reach::NotLibrary` under a `cfg_attr` requiring `test`.
+    Path { path: &'a str, reach: Reach },
 }
 
 /// How a `mod` item gives its contents.
@@ -120,25 +135,45 @@ pub struct BadPath {
 
 impl Paths {
     /// The location with no cfg set, then the `cfg_attr` path values.
-    fn split(&self) -> (Location<'_>, &[String]) {
+    fn split(&self) -> (Location<'_>, &[Conditional]) {
         match self {
             Self::Open { conditional } => (Location::Default, conditional),
-            Self::Fixed { fixed, conditional } => (Location::Path(fixed), conditional),
+            Self::Fixed { fixed, conditional } => (
+                Location::Path {
+                    path: fixed,
+                    reach: Reach::Library,
+                },
+                conditional,
+            ),
         }
     }
 
     /// Every location some cfg setting gives the module.
     fn locations(&self) -> impl Iterator<Item = Location<'_>> {
         let (unconditional, conditional) = self.split();
-        iter::once(unconditional).chain(conditional.iter().map(|path| Location::Path(path)))
+        iter::once(unconditional).chain(conditional.iter().map(Conditional::location))
     }
 
-    /// Every path value in attribute order.
-    fn into_values(self) -> Vec<String> {
-        match self {
+    /// Every path value in attribute order, each `through` the reach of the cfg around them.
+    fn into_values(self, reach: Reach) -> Vec<Conditional> {
+        let values = match self {
             Self::Open { conditional } => conditional,
-            Self::Fixed { fixed, conditional } => [conditional, vec![fixed]].concat(),
-        }
+            Self::Fixed { fixed, conditional } => [
+                conditional,
+                vec![Conditional {
+                    path: fixed,
+                    reach: Reach::Library,
+                }],
+            ]
+            .concat(),
+        };
+        values
+            .into_iter()
+            .map(|value| Conditional {
+                reach: reach.through(value.reach),
+                ..value
+            })
+            .collect()
     }
 
     /// `self` followed by the attribute `meta` on `line`; once fixed, nothing more applies.
@@ -153,8 +188,21 @@ impl Paths {
     }
 }
 
+impl Conditional {
+    fn location(&self) -> Location<'_> {
+        Location::Path {
+            path: &self.path,
+            reach: self.reach,
+        }
+    }
+}
+
 /// The open paths `conditional` followed by the attribute `meta` on `line`.
-fn open_then(conditional: Vec<String>, meta: &ast::Meta, line: usize) -> Result<Paths, BadPath> {
+fn open_then(
+    conditional: Vec<Conditional>,
+    meta: &ast::Meta,
+    line: usize,
+) -> Result<Paths, BadPath> {
     match meta {
         ast::Meta::KeyValueMeta(pair) => match path_value(pair) {
             Some(value) => Ok(Paths::Fixed {
@@ -166,8 +214,13 @@ fn open_then(conditional: Vec<String>, meta: &ast::Meta, line: usize) -> Result<
         ast::Meta::CfgAttrMeta(cfg_attr) => {
             // The same rule holds inside the `cfg_attr`, and its cfg makes each path conditional.
             let inner = paths(cfg_attr.metas().map(|meta| (meta, line)))?;
+            let reach = gate_reach(
+                cfg_attr
+                    .cfg_predicate()
+                    .is_some_and(|predicate| requires_test(&predicate)),
+            );
             Ok(Paths::Open {
-                conditional: [conditional, inner.into_values()].concat(),
+                conditional: [conditional, inner.into_values(reach)].concat(),
             })
         }
         ast::Meta::CfgMeta(_)
@@ -181,13 +234,30 @@ fn open_then(conditional: Vec<String>, meta: &ast::Meta, line: usize) -> Result<
 /// - Modules inside function bodies and macro bodies are not seen.
 pub fn declarations(text: &str, edition: Edition) -> Result<Vec<Declaration>, BadPath> {
     let (tree, _) = crate::syntax::parse(text, edition);
-    in_items(text, tree.items(), None)
+    in_items(
+        text,
+        tree.items(),
+        None,
+        gate_reach(is_test_gated(tree.syntax())),
+    )
 }
 
+/// - `Reach::NotLibrary` for a test-gated file or module.
+/// - The reach a declaration gives a library route; `Reach::through` combines them.
+const fn gate_reach(test_gated: bool) -> Reach {
+    if test_gated {
+        Reach::NotLibrary
+    } else {
+        Reach::Library
+    }
+}
+
+/// `reach` is that of the items' module: their file, then each inline module around them.
 fn in_items(
     text: &str,
     items: impl Iterator<Item = ast::Item>,
     enclosing: Option<&Enclosing>,
+    reach: Reach,
 ) -> Result<Vec<Declaration>, BadPath> {
     let nested = items
         .filter_map(|item| match item {
@@ -209,7 +279,7 @@ fn in_items(
             | ast::Item::Union(_)
             | ast::Item::Use(_) => None,
         })
-        .map(|module| in_module(text, &module, enclosing))
+        .map(|module| in_module(text, &module, enclosing, reach))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(nested.into_iter().flatten().collect())
 }
@@ -218,9 +288,10 @@ fn in_module(
     text: &str,
     module: &ast::Module,
     enclosing: Option<&Enclosing>,
+    reach: Reach,
 ) -> Result<Vec<Declaration>, BadPath> {
     match (module.name(), Body::of(module)) {
-        (Some(name), Some(body)) => in_named_module(text, module, &name, body, enclosing),
+        (Some(name), Some(body)) => in_named_module(text, module, &name, body, enclosing, reach),
         // A `mod` without a name, or with neither `;` nor an item list, is a syntax error, which
         // the source check reports.
         (None, None | Some(_)) | (Some(_), None) => Ok(Vec::new()),
@@ -234,6 +305,7 @@ fn in_named_module(
     name: &ast::Name,
     body: Body,
     enclosing: Option<&Enclosing>,
+    reach: Reach,
 ) -> Result<Vec<Declaration>, BadPath> {
     // - Invariant: the parser starts every module item at its `mod` keyword.
     // - A missing keyword is a parser bug, not bad input, so there is nothing to report.
@@ -249,12 +321,14 @@ fn in_named_module(
         name: name.text().trim_start_matches("r#").to_owned(),
         paths: paths(attributes)?,
     };
+    let reach = reach.through(gate_reach(is_test_module(module)));
 
     match body {
         Body::OutOfLine => Ok(vec![Declaration {
             line: line(text, keyword.text_range().start()),
             inline: outermost_first(enclosing),
             module: this,
+            reach,
         }]),
         Body::Inline(list) => in_items(
             text,
@@ -263,6 +337,7 @@ fn in_named_module(
                 module: this,
                 outer: enclosing,
             }),
+            reach,
         ),
     }
 }
@@ -286,14 +361,6 @@ fn paths(metas: impl IntoIterator<Item = (ast::Meta, usize)>) -> Result<Paths, B
         },
         |paths, (meta, line)| paths.then(&meta, line),
     )
-}
-
-/// The value of `path = <expr>`.
-fn path_value(pair: &ast::KeyValueMeta) -> Option<ast::Expr> {
-    pair.path()
-        .and_then(|path| path.as_single_name_ref())
-        .filter(|name| name.text() == "path")
-        .and(pair.expr())
 }
 
 /// `None` for anything but a valid string literal.
@@ -356,6 +423,8 @@ struct Base {
     /// `path` values are relative to it: the file's own directory, which differs from `default`
     /// only for a non-mod-rs file outside every inline module.
     path: PathBuf,
+    /// `Reach::NotLibrary` when only `cfg_attr` directories requiring `test` lead here.
+    reach: Reach,
 }
 
 impl Base {
@@ -368,6 +437,7 @@ impl Base {
         Self {
             default,
             path: dir.to_path_buf(),
+            reach: Reach::Library,
         }
     }
 
@@ -378,7 +448,7 @@ impl Base {
         &self,
         module: &Module,
         directory: &impl Fn(&Path) -> Result<Directory>,
-    ) -> Result<Vec<PathBuf>> {
+    ) -> Result<Vec<Self>> {
         let (unconditional, conditional) = module.paths.split();
         // - Kept even when missing: rustc looks there with no cfg set.
         // - So a missing-module error always names it.
@@ -389,31 +459,35 @@ impl Base {
         };
         // - A `cfg_attr` `path` directory that does not exist holds no file.
         // - Entering it anyway doubles the bases at every nesting level.
-        let others = conditional.iter().filter_map(|path| {
-            let written = self.dir(module, Location::Path(path));
+        let others = conditional.iter().filter_map(|value| {
+            let written = self.dir(module, value.location());
+            let reach = self.reach.through(value.reach);
             match directory(&written) {
-                Ok(Directory::At(path)) => Some(Ok(path)),
-                Ok(Directory::AsWritten) => Some(Ok(written)),
+                Ok(Directory::At(path)) => Some(Ok(Self::at(path, reach))),
+                Ok(Directory::AsWritten) => Some(Ok(Self::at(written, reach))),
                 Ok(Directory::Absent) => None,
                 Err(error) => Some(Err(error)),
             }
         });
-        iter::once(Ok(first)).chain(others).collect()
+        iter::once(Ok(Self::at(first, self.reach)))
+            .chain(others)
+            .collect()
     }
 
     /// The directory of the inline module `module` at `location`.
     fn dir(&self, module: &Module, location: Location<'_>) -> PathBuf {
         match location {
             Location::Default => self.default.join(&module.name),
-            Location::Path(path) => self.path.join(path),
+            Location::Path { path, reach: _ } => self.path.join(path),
         }
     }
 
     /// Inside an inline module both bases are its directory.
-    fn at(dir: PathBuf) -> Self {
+    fn at(dir: PathBuf, reach: Reach) -> Self {
         Self {
             default: dir.clone(),
             path: dir,
+            reach,
         }
     }
 
@@ -428,15 +502,18 @@ impl Base {
                     Candidate {
                         path: self.default.join(format!("{}.rs", module.name)),
                         kind: FileKind::NonModRs,
+                        reach: self.reach,
                     },
                     Candidate {
                         path: self.default.join(&module.name).join("mod.rs"),
                         kind: FileKind::ModRs,
+                        reach: self.reach,
                     },
                 ],
-                Location::Path(path) => vec![Candidate {
+                Location::Path { path, reach } => vec![Candidate {
                     path: self.path.join(path),
                     kind: FileKind::ModRs,
+                    reach: self.reach.through(reach),
                 }],
             })
             .collect()
@@ -463,10 +540,7 @@ pub fn candidates(
                 .iter()
                 .map(|base| base.enter(module, &directory))
                 .collect::<Result<Vec<_>>>()?;
-            Ok(first_of_each(entered.into_iter().flatten().collect())
-                .into_iter()
-                .map(Base::at)
-                .collect())
+            Ok(first_of_each(entered.into_iter().flatten().collect()))
         },
     )?;
     Ok(bases
@@ -475,15 +549,19 @@ pub fn candidates(
         .collect())
 }
 
-/// `dirs` in order, each once: `enter` gave every spelling of an existing one the same path.
-fn first_of_each(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
-    dirs.into_iter().fold(Vec::new(), |kept, dir| {
-        if kept.contains(&dir) {
+/// - `bases` in order, each directory once: `enter` gave every spelling of an existing one the
+///   same path.
+/// - A directory several locations lead to is library code when any of them is.
+fn first_of_each(bases: Vec<Base>) -> Vec<Base> {
+    bases
+        .into_iter()
+        .fold(Vec::new(), |mut kept: Vec<Base>, base| {
+            match kept.iter_mut().find(|seen| seen.path == base.path) {
+                Some(seen) => seen.reach = seen.reach.either(base.reach),
+                None => kept.push(base),
+            }
             kept
-        } else {
-            kept.into_iter().chain([dir]).collect()
-        }
-    })
+        })
 }
 
 #[cfg(test)]

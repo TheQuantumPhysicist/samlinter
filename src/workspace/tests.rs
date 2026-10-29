@@ -1,13 +1,14 @@
 use super::lookup::memory::{Content, Memory};
 use super::lookup::{Files, Unfollowed};
 use super::{
-    Package, PackageKind, PackageMetadata, Readme, Root, Section, TextFile, Workspace, assemble,
-    dependencies, dependency, edition, package_metadata, section,
+    Package, PackageKind, PackageMetadata, Reach, Readme, Root, Section, Target, TextFile,
+    Workspace, assemble, dependencies, dependency, edition, package_metadata, section,
+    target_reach,
 };
 use crate::check;
 use crate::finding::Rule;
 use anyhow::Result;
-use cargo_metadata::DependencyKind;
+use cargo_metadata::{DependencyKind, TargetKind};
 use ra_ap_syntax::Edition;
 use rstest::rstest;
 use std::io;
@@ -57,16 +58,28 @@ fn load_from(
         .iter()
         .map(|(manifest, edition)| {
             let manifest_path = Path::new(ROOT).join(manifest);
-            let roots: Vec<PathBuf> = ["src/lib.rs", "src/main.rs", "build.rs"]
-                .iter()
-                .filter_map(|root| manifest_path.parent().map(|dir| dir.join(root)))
-                .filter(|root| {
-                    files
-                        .iter()
-                        .any(|(path, _)| Path::new(ROOT).join(path) == *root)
+            let targets: Vec<Target> = [
+                ("src/lib.rs", Reach::Library),
+                ("src/main.rs", Reach::NotLibrary),
+                ("build.rs", Reach::NotLibrary),
+            ]
+            .iter()
+            .filter_map(|(root, reach)| {
+                manifest_path.parent().map(|dir| Target {
+                    root: dir.join(root),
+                    reach: *reach,
                 })
-                .collect();
-            let kind = if roots.iter().any(|root| root.ends_with("src/main.rs")) {
+            })
+            .filter(|target| {
+                files
+                    .iter()
+                    .any(|(path, _)| Path::new(ROOT).join(path) == target.root)
+            })
+            .collect();
+            let kind = if targets
+                .iter()
+                .any(|target| target.root.ends_with("src/main.rs"))
+            {
                 PackageKind::Binary
             } else {
                 PackageKind::Library
@@ -76,7 +89,7 @@ fn load_from(
                 kind,
                 edition: *edition,
                 dependencies: Vec::new(),
-                roots,
+                targets,
             }
         })
         .collect();
@@ -216,6 +229,19 @@ fn package_files(package: &Package) -> Vec<String> {
     ],
     &["p/Cargo.toml"],
     &["virtual: Cargo.toml", "p/Cargo.toml: p/src/lib.rs", "p/Cargo.toml: p/src/u.rs", "p/Cargo.toml: p/src/w.rs"]
+)]
+#[case::raw_identifier_path_key(
+    &[
+        ("p/Cargo.toml", Content::Text("")),
+        ("p/src/lib.rs", Content::Text("#[r#path = \"inner/x.rs\"]\nmod x;\n")),
+        ("p/src/inner/x.rs", Content::Text("")),
+    ],
+    &["p/Cargo.toml"],
+    &[
+        "virtual: Cargo.toml",
+        "p/Cargo.toml: p/src/inner/x.rs",
+        "p/Cargo.toml: p/src/lib.rs",
+    ]
 )]
 #[case::virtual_root_readme_and_package_readme(
     &[
@@ -694,12 +720,23 @@ fn unusable_metadata_paths_are_errors(
         kind: PackageKind::Library,
         edition: Edition::Edition2024,
         dependencies: Vec::new(),
-        roots: roots.iter().map(PathBuf::from).collect(),
+        targets: library_targets(roots),
     };
     let error = assemble(&memory, Path::new(ROOT), vec![package])
         .err()
         .unwrap();
     assert_eq!(format!("{error:#}"), expected);
+}
+
+/// Library targets at `roots`.
+fn library_targets(roots: &[&str]) -> Vec<Target> {
+    roots
+        .iter()
+        .map(|root| Target {
+            root: PathBuf::from(root),
+            reach: Reach::Library,
+        })
+        .collect()
 }
 
 /// The root manifest is read on its own, as a root package's manifest or a virtual root's.
@@ -879,7 +916,7 @@ fn load_above(
         kind: PackageKind::Library,
         edition: Edition::Edition2024,
         dependencies: Vec::new(),
-        roots: roots.iter().map(PathBuf::from).collect(),
+        targets: library_targets(roots),
     };
     assemble(
         &Above { memory, given },
@@ -1474,23 +1511,246 @@ fn package_metadata_reads_kind_edition_and_target_roots(
     assert_eq!(metadata.manifest_path, PathBuf::from("/ws/p/Cargo.toml"));
     assert_eq!(metadata.kind, kind);
     assert_eq!(metadata.edition, expected_edition);
-    assert_eq!(metadata.roots, expected_roots);
+    let read_roots: Vec<PathBuf> = metadata
+        .targets
+        .into_iter()
+        .map(|target| target.root)
+        .collect();
+    assert_eq!(read_roots, expected_roots);
 }
 
 #[rstest]
-#[case::plain("name = \"serde\"\nkind = \"normal\"\n", ("serde", "serde", Section::Normal, None))]
+#[case::lib(&[TargetKind::Lib], Reach::Library)]
+#[case::rlib(&[TargetKind::RLib], Reach::Library)]
+#[case::dylib(&[TargetKind::DyLib], Reach::Library)]
+#[case::cdylib(&[TargetKind::CDyLib], Reach::Library)]
+#[case::staticlib(&[TargetKind::StaticLib], Reach::Library)]
+#[case::proc_macro(&[TargetKind::ProcMacro], Reach::Library)]
+#[case::lib_and_cdylib(&[TargetKind::Lib, TargetKind::CDyLib], Reach::Library)]
+#[case::unknown(&[TargetKind::Unknown("new".to_owned())], Reach::Library)]
+#[case::bin(&[TargetKind::Bin], Reach::NotLibrary)]
+#[case::example(&[TargetKind::Example], Reach::NotLibrary)]
+#[case::test_target(&[TargetKind::Test], Reach::NotLibrary)]
+#[case::bench(&[TargetKind::Bench], Reach::NotLibrary)]
+#[case::build_script(&[TargetKind::CustomBuild], Reach::NotLibrary)]
+fn only_library_targets_hold_library_code(#[case] kinds: &[TargetKind], #[case] expected: Reach) {
+    assert_eq!(target_reach(kinds), expected);
+}
+
+/// Every source of each member as `<shown> <reach>`, by whether its package's library code holds
+/// it.
+fn reaches(workspace: &Workspace) -> Vec<String> {
+    workspace
+        .members
+        .iter()
+        .flat_map(|package| {
+            package.sources.iter().map(|file| {
+                let reach = if package.library_code.contains(&file.path) {
+                    Reach::Library
+                } else {
+                    Reach::NotLibrary
+                };
+                format!("{} {reach:?}", file.shown.display())
+            })
+        })
+        .collect()
+}
+
+#[rstest]
+#[case::tests_module(
+    &[
+        ("p/src/lib.rs", "mod a;\n\n#[cfg(test)]\nmod tests;\n"),
+        ("p/src/a.rs", ""),
+        ("p/src/tests.rs", "mod helper;\n"),
+        ("p/src/tests/helper.rs", ""),
+    ],
+    &[
+        "p/src/a.rs Library",
+        "p/src/lib.rs Library",
+        "p/src/tests/helper.rs NotLibrary",
+        "p/src/tests.rs NotLibrary",
+    ]
+)]
+#[case::test_only_inline_module(
+    &[("p/src/lib.rs", "#[cfg(all(test, unix))]\nmod inline {\n    mod deep;\n}\n"), ("p/src/inline/deep.rs", "")],
+    &["p/src/inline/deep.rs NotLibrary", "p/src/lib.rs Library"]
+)]
+#[case::inner_test_gate_of_an_inline_module(
+    &[("p/src/lib.rs", "mod inline {\n    #![cfg(test)]\n\n    mod deep;\n}\n"), ("p/src/inline/deep.rs", "")],
+    &["p/src/inline/deep.rs NotLibrary", "p/src/lib.rs Library"]
+)]
+#[case::test_only_file(
+    &[("p/src/lib.rs", "#![cfg(test)]\n\nmod a;\n"), ("p/src/a.rs", "")],
+    &["p/src/a.rs NotLibrary", "p/src/lib.rs Library"]
+)]
+#[case::any_gate_is_library_code(
+    &[("p/src/lib.rs", "#[cfg(any(test, unix))]\nmod a;\n"), ("p/src/a.rs", "")],
+    &["p/src/a.rs Library", "p/src/lib.rs Library"]
+)]
+#[case::route_reached_later_as_library_code(
+    &[
+        ("p/src/lib.rs", "#[cfg(test)]\nmod t;\n#[path = \"shared.rs\"]\nmod shared;\n"),
+        ("p/src/t.rs", "#[path = \"shared.rs\"]\nmod shared;\n"),
+        ("p/src/shared.rs", "mod child;\n"),
+        ("p/src/child.rs", ""),
+    ],
+    &[
+        "p/src/child.rs Library",
+        "p/src/lib.rs Library",
+        "p/src/shared.rs Library",
+        "p/src/t.rs NotLibrary",
+    ]
+)]
+#[case::test_only_cfg_attr_path(
+    &[
+        ("p/src/lib.rs", "#[cfg_attr(test, path = \"mock.rs\")]\nmod imp;\n"),
+        ("p/src/imp.rs", ""),
+        ("p/src/mock.rs", "mod inner;\n"),
+        ("p/src/inner.rs", ""),
+    ],
+    &[
+        "p/src/imp.rs Library",
+        "p/src/inner.rs NotLibrary",
+        "p/src/lib.rs Library",
+        "p/src/mock.rs NotLibrary",
+    ]
+)]
+#[case::other_cfg_attr_path(
+    &[
+        ("p/src/lib.rs", "#[cfg_attr(unix, path = \"unix.rs\")]\nmod imp;\n"),
+        ("p/src/imp.rs", ""),
+        ("p/src/unix.rs", ""),
+    ],
+    &["p/src/imp.rs Library", "p/src/lib.rs Library", "p/src/unix.rs Library"]
+)]
+#[case::nested_test_only_cfg_attr_path(
+    &[
+        (
+            "p/src/lib.rs",
+            "#[cfg_attr(unix, cfg_attr(all(test, unix), path = \"mock.rs\"))]\nmod imp;\n",
+        ),
+        ("p/src/imp.rs", ""),
+        ("p/src/mock.rs", ""),
+    ],
+    &["p/src/imp.rs Library", "p/src/lib.rs Library", "p/src/mock.rs NotLibrary"]
+)]
+#[case::test_only_cfg_attr_directory(
+    &[
+        (
+            "p/src/lib.rs",
+            "#[cfg_attr(test, path = \"fake\")]\nmod inline {\n    mod deep;\n}\n",
+        ),
+        ("p/src/inline/deep.rs", ""),
+        ("p/src/fake/deep.rs", ""),
+    ],
+    &["p/src/fake/deep.rs NotLibrary", "p/src/inline/deep.rs Library", "p/src/lib.rs Library"]
+)]
+#[case::file_two_routes_reach(
+    &[
+        ("p/src/lib.rs", "mod a;\n#[cfg(test)]\n#[path = \"a.rs\"]\nmod b;\n"),
+        ("p/src/a.rs", ""),
+    ],
+    &["p/src/a.rs Library", "p/src/lib.rs Library"]
+)]
+fn test_only_declarations_lead_out_of_library_code(
+    #[case] files: &[(&str, &'static str)],
+    #[case] expected: &[&str],
+) {
+    let files: Vec<(&str, Content)> = files
+        .iter()
+        .map(|(path, text)| (*path, Content::Text(text)))
+        .collect();
+    assert_eq!(reaches(&load_p(&files).unwrap()), expected);
+}
+
+/// A file another package owns stays the reaching library's code.
+#[test]
+fn library_code_spans_packages() {
+    let workspace = load(
+        &[
+            ("a/Cargo.toml", Content::Text("")),
+            (
+                "a/src/lib.rs",
+                Content::Text("#[path = \"../../b/src/helper.rs\"]\nmod helper;\n"),
+            ),
+            ("b/Cargo.toml", Content::Text("")),
+            ("b/src/lib.rs", Content::Text("#[cfg(test)]\nmod helper;\n")),
+            ("b/src/helper.rs", Content::Text("")),
+        ],
+        &["a/Cargo.toml", "b/Cargo.toml"],
+    )
+    .unwrap();
+    let code: Vec<(String, Vec<PathBuf>)> = workspace
+        .members
+        .iter()
+        .map(|package| {
+            (
+                package.manifest.shown.display().to_string(),
+                package.library_code.iter().cloned().collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        (reaches(&workspace), code),
+        (
+            vec![
+                "a/src/lib.rs Library".to_owned(),
+                "b/src/helper.rs NotLibrary".to_owned(),
+                "b/src/lib.rs Library".to_owned(),
+            ],
+            vec![
+                (
+                    "a/Cargo.toml".to_owned(),
+                    vec![
+                        PathBuf::from("/ws/a/src/lib.rs"),
+                        PathBuf::from("/ws/b/src/helper.rs")
+                    ],
+                ),
+                (
+                    "b/Cargo.toml".to_owned(),
+                    vec![PathBuf::from("/ws/b/src/lib.rs")]
+                ),
+            ]
+        )
+    );
+}
+
+#[test]
+fn build_script_modules_are_not_library_code() {
+    let workspace = load(
+        &[
+            ("p/Cargo.toml", Content::Text("")),
+            ("p/src/lib.rs", Content::Text("")),
+            ("p/build.rs", Content::Text("mod helper;\n")),
+            ("p/helper.rs", Content::Text("")),
+        ],
+        &["p/Cargo.toml"],
+    )
+    .unwrap();
+    assert_eq!(
+        reaches(&workspace),
+        [
+            "p/build.rs NotLibrary",
+            "p/helper.rs NotLibrary",
+            "p/src/lib.rs Library"
+        ]
+    );
+}
+
+#[rstest]
+#[case::plain("name = \"serde\"\nkind = \"normal\"\n", ("serde", Section::Normal))]
 #[case::renamed(
     "name = \"tracing-subscriber\"\nrename = \"logging\"\nkind = \"normal\"\n",
-    ("logging", "tracing-subscriber", Section::Normal, None)
+    ("tracing-subscriber", Section::Normal)
 )]
 #[case::target_specific(
     "name = \"libc\"\nkind = \"dev\"\ntarget = \"cfg(unix)\"\n",
-    ("libc", "libc", Section::Development, Some("cfg(unix)"))
+    ("libc", Section::Development)
 )]
-#[case::build("name = \"cc\"\nkind = \"build\"\n", ("cc", "cc", Section::Build, None))]
-fn dependency_keeps_key_crate_name_section_and_platform(
+#[case::build("name = \"cc\"\nkind = \"build\"\n", ("cc", Section::Build))]
+fn dependency_keeps_crate_name_and_section(
     #[case] fields: &str,
-    #[case] expected: (&str, &str, Section, Option<&str>),
+    #[case] expected: (&str, Section),
 ) {
     // `cargo metadata` output for one dependency, with the fields samlinter does not read fixed.
     let metadata: cargo_metadata::Dependency = toml_edit::de::from_str(&format!(
@@ -1498,16 +1758,7 @@ fn dependency_keeps_key_crate_name_section_and_platform(
     ))
     .unwrap();
     let read = dependency(&metadata).unwrap();
-    let target = read.target.as_ref().map(ToString::to_string);
-    assert_eq!(
-        (
-            read.key.as_str(),
-            read.crate_name.as_str(),
-            read.section,
-            target.as_deref()
-        ),
-        expected
-    );
+    assert_eq!((read.crate_name.as_str(), read.section), expected);
 }
 
 #[rstest]
