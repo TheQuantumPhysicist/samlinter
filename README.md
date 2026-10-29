@@ -9,7 +9,7 @@ No finding is a mere warning and there are no rule switches: any finding fails t
 
 ```sh
 cargo install --path . --locked             # from a local checkout
-cargo install samlinter --locked            # from crates.io, once published
+cargo install samlinter --locked            # from crates.io
 samlinter                                   # anywhere inside the workspace
 samlinter --manifest-path path/to/Cargo.toml
 ```

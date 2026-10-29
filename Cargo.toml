@@ -3,9 +3,7 @@ name = "samlinter"
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
-# - TODO: add `repository`, the source link crates.io shows on the crate page.
-# - Postponed: the project has no public repository URL yet.
-# - Plan: set it to that URL when the repository is published.
+repository = "https://github.com/TheQuantumPhysicist/samlinter"
 description = "Syntax gate for Rust code rules clippy cannot express: rest patterns, restricted visibility, item layout, comment text, Cargo.toml conventions"
 readme = "README.md"
 keywords = ["lint", "linter", "static-analysis", "cargo"]
