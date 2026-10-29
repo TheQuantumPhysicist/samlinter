@@ -1,10 +1,3 @@
-// - TODO: randomized variant: a random record, tuple or tuple-struct pattern with n fields
-//   and an optional rest at a random index gives one hit, at the rest, only when the rest is
-//   present.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
 use super::super::render;
 use super::check;
 use ra_ap_syntax::AstNode;

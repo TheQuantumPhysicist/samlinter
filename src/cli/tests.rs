@@ -1,9 +1,3 @@
-// - TODO: randomized variant: random argument lists of 0..4 tokens from a pool of flags and
-//   paths parse only in the accepted shapes.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
 use super::{Command, HELP, parse};
 use rstest::rstest;
 use std::ffi::OsString;
@@ -35,6 +29,10 @@ fn non_utf8() -> OsString {
 )]
 #[case::help(&["--help"], Command::Help)]
 #[case::short_help(&["-h"], Command::Help)]
+#[case::flag_spelled_path(
+    &["--manifest-path", "-h"],
+    Command::Check { manifest_path: Some(PathBuf::from("-h")) }
+)]
 #[case::version(&["--version"], Command::Version)]
 #[case::short_version(&["-V"], Command::Version)]
 fn accepts_documented_arguments(#[case] arguments: &[&str], #[case] expected: Command) {
@@ -62,9 +60,15 @@ fn keeps_a_non_utf8_manifest_path() {
 }
 
 #[test]
-fn help_says_where_paths_are_relative_to() {
+fn help_says_how_paths_show() {
     assert!(
-        HELP.contains("\nPaths are relative to the workspace root, absolute outside it.\n"),
+        HELP.contains(
+            "\nPaths are relative to the workspace root, absolute outside it.\n\
+             Every file (sources, manifests, READMEs, samlinter.toml) shows by its path, . and\n\
+             .. resolved; binary_readme names where the missing README belongs. Symlinks are\n\
+             not followed: a symlink samlinter reads or enters, other than the workspace root\n\
+             and its parents, stops the run (exit 2).\n"
+        ),
         "{HELP}"
     );
 }

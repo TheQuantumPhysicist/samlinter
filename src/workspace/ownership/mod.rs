@@ -12,7 +12,6 @@ pub fn owned_sources(reached: ByManifest) -> BTreeMap<PathBuf, Owned> {
         .iter()
         .map(|(manifest, package)| Reach {
             manifest: manifest.clone(),
-            dir: package.dir.clone(),
             files: package
                 .sources
                 .iter()
@@ -28,7 +27,7 @@ pub fn owned_sources(reached: ByManifest) -> BTreeMap<PathBuf, Owned> {
         .map(|((manifest, package), asking)| {
             let Reached {
                 metadata,
-                dir,
+                manifest: walked,
                 sources,
             } = package;
             let sources = sources
@@ -37,7 +36,7 @@ pub fn owned_sources(reached: ByManifest) -> BTreeMap<PathBuf, Owned> {
                 .collect();
             let owned = Owned {
                 metadata,
-                dir,
+                manifest: walked,
                 sources,
             };
             (manifest, owned)
@@ -47,10 +46,8 @@ pub fn owned_sources(reached: ByManifest) -> BTreeMap<PathBuf, Owned> {
 
 /// The files one package reaches.
 struct Reach {
-    /// The canonical manifest path.
+    /// The manifest path, lexically normalized; the package directory is its parent.
     manifest: PathBuf,
-    /// The canonical package directory, which need not hold the canonical manifest.
-    dir: PathBuf,
     files: BTreeSet<PathBuf>,
 }
 
@@ -68,12 +65,14 @@ fn owner<'a>(reaches: &'a [Reach], file: &Path, asking: &'a Reach) -> &'a Path {
 
 /// - How strongly the package of `reach` claims `file`, strongest greatest: the depth of the
 ///   package directory when it holds the file, then the lower manifest path.
-/// - All paths are canonical and absolute, so the root package holds no file outside the root
-///   directory.
+/// - All paths are absolute and lexically normalized, with no symlink on the way, so the root
+///   package holds no file outside the root directory.
 fn claim<'a>(file: &Path, reach: &'a Reach) -> (Option<usize>, Reverse<&'a Path>) {
-    let depth = file
-        .starts_with(&reach.dir)
-        .then(|| reach.dir.components().count());
+    let depth = reach
+        .manifest
+        .parent()
+        .filter(|dir| file.starts_with(dir))
+        .map(|dir| dir.components().count());
     (depth, Reverse(reach.manifest.as_path()))
 }
 

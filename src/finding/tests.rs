@@ -1,10 +1,3 @@
-// - TODO: randomized variant: random text of ASCII, accented letters, an emoji and newlines,
-//   cut at a random char boundary: `Position::of` gives line 1 plus the newlines before the
-//   offset, column 1 plus the chars since the last newline.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
 use super::{Exemptability, Finding, ManifestExemptable, Position, Rule, SourceExemptable, Span};
 use rstest::rstest;
 use std::path::PathBuf;

@@ -1,182 +1,21 @@
-// - TODO: randomized variant: a random root plus a random relative suffix comes back out of
-//   `relative` as the suffix; a random path outside the root, a sibling sharing its prefix
-//   included, comes back unchanged; a random string that is no edition makes `edition` ask
-//   for an upgrade; a random tree of files, links and directories, asked about random paths
-//   through it, gets the same answers from `Disk` and `Memory`; a random list of target
-//   kinds makes `package_metadata` report a binary exactly when one is `bin`, every root in
-//   target order; a random dependency name and rename come out of `dependency` as crate
-//   name and key.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
+use super::lookup::memory::{Content, Memory};
+use super::lookup::{Files, Unfollowed};
 use super::{
-    Disk, Files, Package, PackageKind, PackageMetadata, Readme, Root, Section, TextFile, Workspace,
-    assemble, dependencies, dependency, edition, package_metadata, relative, section,
+    Package, PackageKind, PackageMetadata, Readme, Root, Section, TextFile, Workspace, assemble,
+    dependencies, dependency, edition, package_metadata, section,
 };
 use crate::check;
-use crate::config::Config;
 use crate::finding::Rule;
 use anyhow::Result;
 use cargo_metadata::DependencyKind;
 use ra_ap_syntax::Edition;
 use rstest::rstest;
-use std::collections::BTreeMap;
-use std::fs;
 use std::io;
-use std::path::{Component, Path, PathBuf};
-use std::process;
+use std::path::{Path, PathBuf};
 
 const ROOT: &str = "/ws";
 
 const CONFIG: &str = "forbidden-words = []\nsubscriber-crates = []\n";
-
-#[derive(Clone, Copy)]
-enum Content {
-    Text(&'static str),
-    NotUtf8,
-    Directory,
-    /// A symlink, by its target's path relative to `ROOT`.
-    Link(&'static str),
-    /// An empty file that is gone when resolved, as when it is deleted mid-run.
-    Vanishing,
-}
-
-/// - The contents that can also be written to a real disk, where a file stays put.
-/// - So the `Disk` contract has no form for a file deleted mid-run.
-#[derive(Clone, Copy)]
-enum Lasting {
-    Text(&'static str),
-    NotUtf8,
-    Directory,
-    /// By its target's path relative to the root.
-    Link(&'static str),
-}
-
-impl From<Lasting> for Content {
-    fn from(lasting: Lasting) -> Self {
-        match lasting {
-            Lasting::Text(text) => Self::Text(text),
-            Lasting::NotUtf8 => Self::NotUtf8,
-            Lasting::Directory => Self::Directory,
-            Lasting::Link(target) => Self::Link(target),
-        }
-    }
-}
-
-/// What a path holds once symlinks are followed.
-#[derive(Clone, Copy)]
-enum Node {
-    Text(&'static str),
-    NotUtf8,
-    Directory,
-    Vanishing,
-}
-
-/// - An in-memory file system holding absolute paths.
-/// - Every ancestor of an entry is a directory entry; `Memory::new` adds them.
-/// - A path resolves one component at a time, as on disk: a missing component, or one below
-///   a file, is an error even when a later `..` would leave it.
-struct Memory(BTreeMap<PathBuf, Content>);
-
-impl Memory {
-    /// - `entries`, the last one for a path winning, plus a directory for each ancestor.
-    /// - Panics when an ancestor is held as something else: no disk holds that tree.
-    fn new(entries: impl IntoIterator<Item = (PathBuf, Content)>) -> Self {
-        let entries: BTreeMap<PathBuf, Content> = entries.into_iter().collect();
-        let ancestors: Vec<PathBuf> = entries
-            .keys()
-            .flat_map(|path| path.ancestors().skip(1))
-            .map(Path::to_path_buf)
-            .collect();
-        for ancestor in &ancestors {
-            match entries.get(ancestor) {
-                None | Some(Content::Directory) => {}
-                Some(
-                    Content::Text(_) | Content::NotUtf8 | Content::Link(_) | Content::Vanishing,
-                ) => panic!("{} holds entries but is no directory", ancestor.display()),
-            }
-        }
-
-        let directories = ancestors
-            .into_iter()
-            .map(|ancestor| (ancestor, Content::Directory));
-        Self(directories.chain(entries).collect())
-    }
-
-    /// The canonical form of `path` and what it holds.
-    fn resolve(&self, path: &Path) -> io::Result<(PathBuf, Node)> {
-        path.components().try_fold(
-            (PathBuf::new(), Node::Directory),
-            |(resolved, node), component| {
-                within(node)?;
-                match component {
-                    Component::Prefix(_) | Component::RootDir => {
-                        Ok((resolved.join(component), Node::Directory))
-                    }
-                    Component::CurDir => Ok((resolved, Node::Directory)),
-                    // `..` at the root stays at the root, as on disk.
-                    Component::ParentDir => {
-                        let parent = resolved.parent().map(Path::to_path_buf);
-                        Ok((parent.unwrap_or(resolved), Node::Directory))
-                    }
-                    Component::Normal(name) => self.step(resolved.join(name)),
-                }
-            },
-        )
-    }
-
-    /// What `path`, whose parent is a resolved directory, holds.
-    fn step(&self, path: PathBuf) -> io::Result<(PathBuf, Node)> {
-        match self.0.get(&path) {
-            Some(Content::Link(target)) => self.resolve(&Path::new(ROOT).join(target)),
-            Some(Content::Text(text)) => Ok((path, Node::Text(text))),
-            Some(Content::NotUtf8) => Ok((path, Node::NotUtf8)),
-            Some(Content::Directory) => Ok((path, Node::Directory)),
-            Some(Content::Vanishing) => Ok((path, Node::Vanishing)),
-            None => Err(io::Error::from(io::ErrorKind::NotFound)),
-        }
-    }
-}
-
-/// Only a directory has entries below it.
-fn within(node: Node) -> io::Result<()> {
-    match node {
-        Node::Directory => Ok(()),
-        Node::Text(_) | Node::NotUtf8 | Node::Vanishing => {
-            Err(io::Error::from(io::ErrorKind::NotADirectory))
-        }
-    }
-}
-
-impl Files for Memory {
-    fn read(&self, path: &Path) -> io::Result<String> {
-        match self.resolve(path)?.1 {
-            Node::Text(text) => Ok(text.to_owned()),
-            Node::Vanishing => Ok(String::new()),
-            Node::NotUtf8 => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "stream did not contain valid UTF-8",
-            )),
-            Node::Directory => Err(io::Error::from(io::ErrorKind::IsADirectory)),
-        }
-    }
-
-    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
-        let (resolved, node) = self.resolve(path)?;
-        match node {
-            Node::Vanishing => Err(io::Error::from(io::ErrorKind::NotFound)),
-            Node::Text(_) | Node::NotUtf8 | Node::Directory => Ok(resolved),
-        }
-    }
-
-    fn is_file(&self, path: &Path) -> bool {
-        match self.resolve(path) {
-            Ok((_, Node::Text(_) | Node::NotUtf8 | Node::Vanishing)) => true,
-            Ok((_, Node::Directory)) | Err(_) => false,
-        }
-    }
-}
 
 /// - Loads a workspace at `/ws` holding `files` plus a root `Cargo.toml` and `samlinter.toml`;
 ///   an entry in `files` replaces either.
@@ -190,15 +29,19 @@ fn load(files: &[(&str, Content)], manifests: &[&str]) -> Result<Workspace> {
 
 /// `load` with every package of `edition`.
 fn load_in(edition: Edition, files: &[(&str, Content)], manifests: &[&str]) -> Result<Workspace> {
-    load_from(Path::new(ROOT), edition, files, manifests)
+    let manifests: Vec<(&str, Edition)> = manifests
+        .iter()
+        .map(|manifest| (*manifest, edition))
+        .collect();
+    load_from(Path::new(ROOT), files, &manifests)
 }
 
-/// `load_in` with `workspace_root` as `cargo metadata` names the root.
+/// `load` with each package of its own edition and `workspace_root` as `cargo metadata` names
+/// the root.
 fn load_from(
     workspace_root: &Path,
-    edition: Edition,
     files: &[(&str, Content)],
-    manifests: &[&str],
+    manifests: &[(&str, Edition)],
 ) -> Result<Workspace> {
     let defaults = [
         ("Cargo.toml", Content::Text("[workspace]\n")),
@@ -212,12 +55,16 @@ fn load_from(
     );
     let packages = manifests
         .iter()
-        .map(|manifest| {
+        .map(|(manifest, edition)| {
             let manifest_path = Path::new(ROOT).join(manifest);
             let roots: Vec<PathBuf> = ["src/lib.rs", "src/main.rs", "build.rs"]
                 .iter()
                 .filter_map(|root| manifest_path.parent().map(|dir| dir.join(root)))
-                .filter(|root| memory.is_file(root))
+                .filter(|root| {
+                    files
+                        .iter()
+                        .any(|(path, _)| Path::new(ROOT).join(path) == *root)
+                })
                 .collect();
             let kind = if roots.iter().any(|root| root.ends_with("src/main.rs")) {
                 PackageKind::Binary
@@ -227,7 +74,7 @@ fn load_from(
             PackageMetadata {
                 manifest_path,
                 kind,
-                edition,
+                edition: *edition,
                 dependencies: Vec::new(),
                 roots,
             }
@@ -325,17 +172,6 @@ fn package_files(package: &Package) -> Vec<String> {
     &["p/Cargo.toml"],
     &["virtual: Cargo.toml", "p/Cargo.toml: p/src/a/b.rs", "p/Cargo.toml: p/src/a.rs", "p/Cargo.toml: p/src/b.rs", "p/Cargo.toml: p/src/lib.rs"]
 )]
-#[case::symlinked_file_resolves_children_beside_the_link(
-    &[
-        ("p/Cargo.toml", Content::Text("")),
-        ("p/src/lib.rs", Content::Text("mod link;\n")),
-        ("p/src/link.rs", Content::Link("p/src/elsewhere/t.rs")),
-        ("p/src/elsewhere/t.rs", Content::Text("mod child;\n")),
-        ("p/src/link/child.rs", Content::Text("")),
-    ],
-    &["p/Cargo.toml"],
-    &["virtual: Cargo.toml", "p/Cargo.toml: p/src/elsewhere/t.rs", "p/Cargo.toml: p/src/lib.rs", "p/Cargo.toml: p/src/link/child.rs"]
-)]
 #[case::route_back_to_a_followed_file_stops(
     &[
         ("p/Cargo.toml", Content::Text("")),
@@ -343,6 +179,23 @@ fn package_files(package: &Package) -> Vec<String> {
     ],
     &["p/Cargo.toml"],
     &["virtual: Cargo.toml", "p/Cargo.toml: p/src/lib.rs"]
+)]
+#[case::route_back_through_dot_dot_stops(
+    &[
+        ("p/Cargo.toml", Content::Text("")),
+        ("p/src/lib.rs", Content::Text("#[path = \"../src/lib.rs\"]\nmod me;\n")),
+    ],
+    &["p/Cargo.toml"],
+    &["virtual: Cargo.toml", "p/Cargo.toml: p/src/lib.rs"]
+)]
+#[case::only_the_mod_rs_file_of_a_module(
+    &[
+        ("p/Cargo.toml", Content::Text("")),
+        ("p/src/lib.rs", Content::Text("mod a;\n")),
+        ("p/src/a/mod.rs", Content::Text("")),
+    ],
+    &["p/Cargo.toml"],
+    &["virtual: Cargo.toml", "p/Cargo.toml: p/src/a/mod.rs", "p/Cargo.toml: p/src/lib.rs"]
 )]
 #[case::both_files_of_a_module_are_kept(
     &[
@@ -383,57 +236,36 @@ fn package_files(package: &Package) -> Vec<String> {
     &["m/Cargo.toml", "Cargo.toml"],
     &["Cargo.toml: src/main.rs", "m/Cargo.toml: m/src/lib.rs"]
 )]
-#[case::root_package_behind_a_symlinked_manifest(
+#[case::absolute_path_inside_an_inline_module_with_a_missing_fixed_directory(
     &[
-        ("Cargo.toml", Content::Link("real/Cargo.toml")),
-        ("real/Cargo.toml", Content::Text("[package]\n")),
-        ("src/main.rs", Content::Text("")),
-    ],
-    &["Cargo.toml"],
-    &["real/Cargo.toml: src/main.rs"]
-)]
-#[case::root_package_behind_a_symlinked_manifest_keeps_the_readme_beside_the_link(
-    &[
-        ("Cargo.toml", Content::Link("real/Cargo.toml")),
-        ("real/Cargo.toml", Content::Text("[package]\n")),
-        ("src/main.rs", Content::Text("")),
-        ("README.md", Content::Text("")),
-    ],
-    &["Cargo.toml"],
-    &["real/Cargo.toml: src/main.rs", "real/Cargo.toml: README.md"]
-)]
-#[case::package_behind_a_symlinked_root_manifest_holds_the_files_beside_the_link(
-    &[
-        ("Cargo.toml", Content::Link("real/Cargo.toml")),
-        ("real/Cargo.toml", Content::Text("[package]\n")),
-        ("src/main.rs", Content::Text("mod x;\n")),
-        ("src/x.rs", Content::Text("")),
-        ("m/Cargo.toml", Content::Text("")),
-        ("m/src/lib.rs", Content::Text("#[path = \"../../src/x.rs\"]\nmod x;\n")),
-    ],
-    &["Cargo.toml", "m/Cargo.toml"],
-    &["real/Cargo.toml: src/main.rs", "real/Cargo.toml: src/x.rs", "m/Cargo.toml: m/src/lib.rs"]
-)]
-#[case::package_behind_a_symlinked_member_manifest_holds_the_files_beside_the_link(
-    &[
-        ("src/main.rs", Content::Text("#[path = \"../m/src/x.rs\"]\nmod x;\n")),
-        ("m/Cargo.toml", Content::Link("elsewhere/Cargo.toml")),
-        ("elsewhere/Cargo.toml", Content::Text("")),
-        ("m/src/lib.rs", Content::Text("mod x;\n")),
-        ("m/src/x.rs", Content::Text("")),
-    ],
-    &["Cargo.toml", "m/Cargo.toml"],
-    &["Cargo.toml: src/main.rs", "elsewhere/Cargo.toml: m/src/lib.rs", "elsewhere/Cargo.toml: m/src/x.rs"]
-)]
-#[case::readme_linked_to_the_root_readme_shows_as_the_root_readme(
-    &[
-        ("README.md", Content::Text("")),
         ("p/Cargo.toml", Content::Text("")),
-        ("p/README.md", Content::Link("README.md")),
-        ("p/src/lib.rs", Content::Text("")),
+        (
+            "p/src/lib.rs",
+            Content::Text("#[path = \"gen\"]\nmod m {\n    #[path = \"/elsewhere/n.rs\"]\n    mod n;\n}\n"),
+        ),
+        ("/elsewhere/n.rs", Content::Text("")),
     ],
     &["p/Cargo.toml"],
-    &["virtual: Cargo.toml", "virtual: README.md", "p/Cargo.toml: p/src/lib.rs", "p/Cargo.toml: README.md"]
+    &["virtual: Cargo.toml", "p/Cargo.toml: /elsewhere/n.rs", "p/Cargo.toml: p/src/lib.rs"]
+)]
+#[case::inline_directory_through_dot_dot(
+    &[
+        ("p/Cargo.toml", Content::Text("")),
+        ("p/src/lib.rs", Content::Text("#[path = \"x/../u\"]\nmod m {\n    mod n;\n}\n")),
+        ("p/src/x/other.rs", Content::Text("")),
+        ("p/src/u/n.rs", Content::Text("")),
+    ],
+    &["p/Cargo.toml"],
+    &["virtual: Cargo.toml", "p/Cargo.toml: p/src/lib.rs", "p/Cargo.toml: p/src/u/n.rs"]
+)]
+#[case::file_in_an_existing_cfg_attr_directory(
+    &[
+        ("p/Cargo.toml", Content::Text("")),
+        ("p/src/lib.rs", Content::Text("#[cfg_attr(unix, path = \"u\")]\nmod m {\n    mod n;\n}\n")),
+        ("p/src/u/n.rs", Content::Text("")),
+    ],
+    &["p/Cargo.toml"],
+    &["virtual: Cargo.toml", "p/Cargo.toml: p/src/lib.rs", "p/Cargo.toml: p/src/u/n.rs"]
 )]
 #[case::file_two_packages_reach_is_loaded_once_by_its_owner(
     &[
@@ -475,6 +307,35 @@ fn modules_are_found_with_the_package_edition(#[case] edition: Edition, #[case] 
     );
 }
 
+/// - Each inline module has two possible directories, so the combinations double per level.
+/// - Only existing directories are followed, each once however it is spelled, so 40 levels
+///   stay cheap.
+#[rstest]
+#[case::missing_directory("x")]
+#[case::same_directory(".")]
+fn nested_cfg_attr_paths_follow_each_existing_directory_once(#[case] path: &str) {
+    const LEVELS: usize = 40;
+    let text = format!(
+        "{}mod leaf;\n{}",
+        format!("#[cfg_attr(never, path = \"{path}\")]\nmod m {{\n").repeat(LEVELS),
+        "}\n".repeat(LEVELS)
+    );
+    let leaf = format!("p/src/{}leaf.rs", "m/".repeat(LEVELS));
+    let workspace = load_p(&[
+        ("p/src/lib.rs", Content::Text(text.leak())),
+        (leaf.clone().leak(), Content::Text("")),
+    ])
+    .unwrap();
+    assert_eq!(
+        render(&workspace),
+        [
+            "virtual: Cargo.toml".to_owned(),
+            "p/Cargo.toml: p/src/lib.rs".to_owned(),
+            format!("p/Cargo.toml: {leaf}"),
+        ]
+    );
+}
+
 #[rstest]
 #[case::declared_module_without_a_file(
     &[("p/src/lib.rs", Content::Text("mod a;\nmod gone;\n")), ("p/src/a.rs", Content::Text(""))],
@@ -492,6 +353,215 @@ fn modules_are_found_with_the_package_edition(#[case] edition: Edition, #[case] 
     ],
     "p/src/a.rs:1: no file for `mod b;`, tried p/src/b.rs, p/src/b/mod.rs"
 )]
+#[case::module_inside_an_inline_module_without_a_directory(
+    &[("p/src/lib.rs", Content::Text("mod m {\n    mod gone;\n}\n"))],
+    "p/src/lib.rs:2: no file for `mod gone;`, tried p/src/m/gone.rs, p/src/m/gone/mod.rs"
+)]
+#[case::inline_module_path_to_a_missing_directory_is_not_tried(
+    &[("p/src/lib.rs", Content::Text("#[cfg_attr(unix, path = \"u\")]\nmod m {\n    mod gone;\n}\n"))],
+    "p/src/lib.rs:3: no file for `mod gone;`, tried p/src/m/gone.rs, p/src/m/gone/mod.rs"
+)]
+// - The `linked_*` cases: a link in each place samlinter looks stops the run.
+// - `Content::Link` models no target, so a dangling or looping link is the same case here;
+//   the disk contract rows `broken.rs` and `loop.rs` pin that real ones are reported as links.
+#[case::linked_target_root(
+    &[
+        ("p/src/lib.rs", Content::Link),
+        ("p/real.rs", Content::Text("")),
+    ],
+    "p/src/lib.rs: samlinter does not follow symlinks"
+)]
+#[case::linked_readme(
+    &[
+        ("p/src/lib.rs", Content::Text("")),
+        ("p/README.md", Content::Link),
+        ("p/real.md", Content::Text("")),
+    ],
+    "p/README.md: samlinter does not follow symlinks"
+)]
+#[case::linked_config(
+    &[
+        ("p/src/lib.rs", Content::Text("")),
+        ("samlinter.toml", Content::Link),
+        ("shared/samlinter.toml", Content::Text(CONFIG)),
+    ],
+    "samlinter.toml: samlinter does not follow symlinks"
+)]
+#[case::linked_member_manifest(
+    &[
+        ("p/src/lib.rs", Content::Text("")),
+        ("p/Cargo.toml", Content::Link),
+        ("real/Cargo.toml", Content::Text("")),
+    ],
+    "p/Cargo.toml: samlinter does not follow symlinks"
+)]
+#[case::linked_path_target(
+    &[
+        ("p/src/lib.rs", Content::Text("#[path = \"x.rs\"]\nmod x;\n")),
+        ("p/src/x.rs", Content::Link),
+        ("p/src/real.rs", Content::Text("")),
+    ],
+    "p/src/x.rs: samlinter does not follow symlinks"
+)]
+#[case::link_in_a_middle_component(
+    &[
+        ("p/src/lib.rs", Content::Text("#[path = \"d/x.rs\"]\nmod x;\n")),
+        ("p/src/d", Content::Link),
+        ("p/real/x.rs", Content::Text("")),
+    ],
+    "p/src/d: samlinter does not follow symlinks"
+)]
+#[case::linked_cfg_attr_inline_directory(
+    &[
+        ("p/src/lib.rs", Content::Text("#[cfg_attr(unix, path = \"u\")]\nmod m {\n    mod n;\n}\n")),
+        ("p/src/u", Content::Link),
+        ("p/real/n.rs", Content::Text("")),
+    ],
+    "p/src/u: samlinter does not follow symlinks"
+)]
+#[case::linked_fixed_inline_directory(
+    &[
+        ("p/src/lib.rs", Content::Text("#[path = \"u\"]\nmod m {\n    mod n;\n}\n")),
+        ("p/src/u", Content::Link),
+        ("p/real/n.rs", Content::Text("")),
+    ],
+    "p/src/u: samlinter does not follow symlinks"
+)]
+#[case::link_left_by_dot_dot(
+    &[
+        ("p/src/lib.rs", Content::Text("#[path = \"d/../x.rs\"]\nmod x;\n")),
+        ("p/src/d", Content::Link),
+        ("p/real/inner.rs", Content::Text("")),
+        ("p/src/x.rs", Content::Text("")),
+        ("p/x.rs", Content::Text("")),
+    ],
+    "p/src/d: samlinter does not follow symlinks"
+)]
+#[case::linked_inline_module_directory(
+    &[
+        ("p/src/lib.rs", Content::Text("mod m {\n    mod n;\n}\n")),
+        ("p/src/m", Content::Link),
+        ("p/real/n.rs", Content::Text("")),
+    ],
+    "p/src/m: samlinter does not follow symlinks"
+)]
+#[case::link_outside_the_root(
+    &[
+        ("p/src/lib.rs", Content::Text("#[path = \"/elsewhere/x.rs\"]\nmod x;\n")),
+        ("/elsewhere/x.rs", Content::Link),
+        ("/elsewhere/real.rs", Content::Text("")),
+    ],
+    "/elsewhere/x.rs: samlinter does not follow symlinks"
+)]
+#[case::candidate_that_cannot_be_inspected(
+    &[("p/src/lib.rs", Content::Text("mod a;\n")), ("p/src/a", Content::Forbidden)],
+    "cannot inspect p/src/a/mod.rs: permission denied"
+)]
+#[case::cfg_attr_inline_path_into_a_forbidden_directory(
+    &[
+        ("p/src/lib.rs", Content::Text("#[cfg_attr(unix, path = \"u\")]\nmod m {\n    mod n;\n}\n")),
+        ("p/src/u", Content::Forbidden),
+    ],
+    "cannot inspect p/src/u/n.rs: permission denied"
+)]
+#[case::fixed_inline_path_into_a_forbidden_directory(
+    &[
+        ("p/src/lib.rs", Content::Text("#[path = \"u\"]\nmod m {\n    mod n;\n}\n")),
+        ("p/src/u", Content::Forbidden),
+    ],
+    "cannot inspect p/src/u/n.rs: permission denied"
+)]
+#[case::inline_module_in_a_forbidden_directory(
+    &[
+        ("p/src/lib.rs", Content::Text("mod m {\n    mod n;\n}\n")),
+        ("p/src/m", Content::Forbidden),
+    ],
+    "cannot inspect p/src/m/n.rs: permission denied"
+)]
+#[case::cfg_attr_inline_directory_that_cannot_be_inspected(
+    &[
+        ("p/src/lib.rs", Content::Text("#[cfg_attr(unix, path = \"f/u\")]\nmod m {\n    mod n;\n}\n")),
+        ("p/src/f", Content::Forbidden),
+    ],
+    "cannot inspect p/src/f/u: permission denied"
+)]
+#[case::fixed_inline_directory_that_cannot_be_inspected(
+    &[
+        ("p/src/lib.rs", Content::Text("#[path = \"f/u\"]\nmod m {\n    mod n;\n}\n")),
+        ("p/src/f", Content::Forbidden),
+    ],
+    "cannot inspect p/src/f/u: permission denied"
+)]
+#[case::default_inline_directory_that_cannot_be_inspected(
+    &[
+        ("p/src/lib.rs", Content::Text("mod f {\n    mod m {\n        mod n;\n    }\n}\n")),
+        ("p/src/f", Content::Forbidden),
+    ],
+    "cannot inspect p/src/f/m: permission denied"
+)]
+#[case::inline_directory_through_dot_dot_after_a_missing_directory(
+    &[
+        ("p/src/lib.rs", Content::Text("#[path = \"x/../u\"]\nmod m {\n    mod n;\n}\n")),
+        ("p/src/u/n.rs", Content::Text("")),
+    ],
+    "p/src/lib.rs:3: no file for `mod n;`, tried p/src/x/../u/n.rs, p/src/x/../u/n/mod.rs"
+)]
+// A path ending in `/` or `/.` names a directory, so no file is there, as for rustc.
+#[case::path_ending_in_a_separator(
+    &[("p/src/lib.rs", Content::Text("#[path = \"x.rs/\"]\nmod x;\n")), ("p/src/x.rs", Content::Text(""))],
+    "p/src/lib.rs:2: no file for `mod x;`, tried p/src/x.rs/"
+)]
+#[case::path_ending_in_a_separator_and_a_dot(
+    &[("p/src/lib.rs", Content::Text("#[path = \"x.rs/.\"]\nmod x;\n")), ("p/src/x.rs", Content::Text(""))],
+    "p/src/lib.rs:2: no file for `mod x;`, tried p/src/x.rs/."
+)]
+#[case::existing_inline_directory_is_tried_as_written(
+    &[
+        ("p/src/lib.rs", Content::Text("mod m {\n    mod gone;\n}\n")),
+        ("p/src/m/other.rs", Content::Text("")),
+    ],
+    "p/src/lib.rs:2: no file for `mod gone;`, tried p/src/m/gone.rs, p/src/m/gone/mod.rs"
+)]
+#[case::second_spelling_of_a_directory_is_dropped(
+    &[
+        ("p/src/lib.rs", Content::Text("#[cfg_attr(unix, path = \"../src/m\")]\nmod m {\n    mod gone;\n}\n")),
+        ("p/src/m/other.rs", Content::Text("")),
+    ],
+    "p/src/lib.rs:3: no file for `mod gone;`, tried p/src/m/gone.rs, p/src/m/gone/mod.rs"
+)]
+#[case::dot_dot_after_a_missing_directory_finds_nothing(
+    &[
+        ("p/src/lib.rs", Content::Text("#[path = \"gone/../x.rs\"]\nmod x;\n")),
+        ("p/src/x.rs", Content::Text("")),
+    ],
+    "p/src/lib.rs:2: no file for `mod x;`, tried p/src/gone/../x.rs"
+)]
+#[case::dot_dot_after_a_file_finds_nothing(
+    &[
+        ("p/src/lib.rs", Content::Text("#[path = \"lib.rs/../x.rs\"]\nmod x;\n")),
+        ("p/src/x.rs", Content::Text("")),
+    ],
+    "p/src/lib.rs:2: no file for `mod x;`, tried p/src/lib.rs/../x.rs"
+)]
+#[case::candidate_that_is_a_directory(
+    &[("p/src/lib.rs", Content::Text("mod a;\n")), ("p/src/a.rs", Content::Directory)],
+    "p/src/lib.rs:1: no file for `mod a;`, tried p/src/a.rs, p/src/a/mod.rs"
+)]
+#[case::cfg_attr_inline_path_naming_a_file_is_not_entered(
+    &[
+        ("p/src/lib.rs", Content::Text("#[cfg_attr(unix, path = \"u\")]\nmod m {\n    mod gone;\n}\n")),
+        ("p/src/u", Content::Text("")),
+    ],
+    "p/src/lib.rs:3: no file for `mod gone;`, tried p/src/m/gone.rs, p/src/m/gone/mod.rs"
+)]
+#[case::fixed_inline_path_to_a_missing_directory(
+    &[("p/src/lib.rs", Content::Text("#[path = \"other\"]\nmod m {\n    mod gone;\n}\n"))],
+    "p/src/lib.rs:3: no file for `mod gone;`, tried p/src/other/gone.rs, p/src/other/gone/mod.rs"
+)]
+#[case::fixed_inner_path_to_a_missing_directory(
+    &[("p/src/lib.rs", Content::Text("mod m {\n    #![path = \"other\"]\n    mod gone;\n}\n"))],
+    "p/src/lib.rs:3: no file for `mod gone;`, tried p/src/other/gone.rs, p/src/other/gone/mod.rs"
+)]
 #[case::path_value_not_a_string(
     &[("p/src/lib.rs", Content::Text("#[path = 5]\nmod x;\n"))],
     "p/src/lib.rs:1: `path` attribute value is not a valid string literal"
@@ -500,49 +570,84 @@ fn modules_are_found_with_the_package_edition(#[case] edition: Edition, #[case] 
     &[("p/src/lib.rs", Content::Text("#[path = \"/elsewhere/x.rs\"]\nmod x;\n"))],
     "p/src/lib.rs:2: no file for `mod x;`, tried /elsewhere/x.rs"
 )]
-#[case::member_manifest_gone_before_it_is_resolved(
+#[case::member_manifest_gone_before_it_is_read(
     &[("p/Cargo.toml", Content::Vanishing), ("p/src/lib.rs", Content::Text(""))],
-    "cannot resolve /ws/p/Cargo.toml: entity not found"
+    "cannot read p/Cargo.toml: entity not found"
 )]
-#[case::root_manifest_gone_before_it_is_resolved(
+#[case::root_manifest_gone_before_it_is_read(
     &[("Cargo.toml", Content::Vanishing), ("p/src/lib.rs", Content::Text(""))],
-    "cannot resolve /ws/Cargo.toml: entity not found"
+    "cannot read Cargo.toml: entity not found"
 )]
 #[case::member_manifest_not_utf8(
     &[("p/Cargo.toml", Content::NotUtf8), ("p/src/lib.rs", Content::Text(""))],
-    "cannot read /ws/p/Cargo.toml: stream did not contain valid UTF-8"
+    "cannot read p/Cargo.toml: stream did not contain valid UTF-8"
 )]
 #[case::virtual_root_manifest_not_utf8(
     &[("Cargo.toml", Content::NotUtf8), ("p/src/lib.rs", Content::Text(""))],
-    "cannot read /ws/Cargo.toml: stream did not contain valid UTF-8"
+    "cannot read Cargo.toml: stream did not contain valid UTF-8"
 )]
 #[case::source_not_utf8(
     &[("p/src/lib.rs", Content::Text("mod a;\n")), ("p/src/a.rs", Content::NotUtf8)],
-    "cannot read /ws/p/src/a.rs: stream did not contain valid UTF-8"
+    "cannot read p/src/a.rs: stream did not contain valid UTF-8"
 )]
-#[case::source_gone_before_it_is_resolved(
+#[case::source_through_dot_dot_not_utf8(
+    &[
+        ("p/src/lib.rs", Content::Text("#[path = \"../src/a.rs\"]\nmod a;\n")),
+        ("p/src/a.rs", Content::NotUtf8),
+    ],
+    "cannot read p/src/a.rs: stream did not contain valid UTF-8"
+)]
+#[case::source_gone_before_it_is_read(
     &[("p/src/lib.rs", Content::Text("mod a;\n")), ("p/src/a.rs", Content::Vanishing)],
-    "cannot resolve /ws/p/src/a.rs: entity not found"
+    "cannot read p/src/a.rs: entity not found"
 )]
-#[case::readme_gone_before_it_is_resolved(
+#[case::readme_gone_before_it_is_read(
     &[("p/src/lib.rs", Content::Text("")), ("p/README.md", Content::Vanishing)],
-    "cannot resolve /ws/p/README.md: entity not found"
+    "cannot read p/README.md: entity not found"
 )]
-#[case::virtual_root_readme_gone_before_it_is_resolved(
+#[case::virtual_root_readme_gone_before_it_is_read(
     &[("p/src/lib.rs", Content::Text("")), ("README.md", Content::Vanishing)],
-    "cannot resolve /ws/README.md: entity not found"
+    "cannot read README.md: entity not found"
 )]
-#[case::config_gone_before_it_is_resolved(
+#[case::config_gone_before_it_is_read(
     &[("p/src/lib.rs", Content::Text("")), ("samlinter.toml", Content::Vanishing)],
-    "cannot resolve /ws/samlinter.toml: entity not found"
+    "cannot read samlinter.toml; every workspace needs one, see the README: entity not found"
+)]
+#[case::readme_not_utf8(
+    &[("p/src/lib.rs", Content::Text("")), ("p/README.md", Content::NotUtf8)],
+    "cannot read p/README.md: stream did not contain valid UTF-8"
 )]
 #[case::readme_unreadable(
     &[("p/src/lib.rs", Content::Text("")), ("p/README.md", Content::Directory)],
-    "cannot read /ws/p/README.md: is a directory"
+    "cannot read p/README.md: is a directory"
 )]
 #[case::virtual_root_readme_unreadable(
     &[("p/src/lib.rs", Content::Text("")), ("README.md", Content::Directory)],
-    "cannot read /ws/README.md: is a directory"
+    "cannot read README.md: is a directory"
+)]
+#[case::config_that_does_not_parse_stops_the_run_before_any_module_walk(
+    &[
+        ("p/src/lib.rs", Content::Text("mod gone;\n")),
+        ("samlinter.toml", Content::Text("forbidden-words = [\n")),
+    ],
+    "invalid samlinter.toml: TOML parse error at line 1, column 20\n  |\n1 | forbidden-words = [\n  |                    ^\nunclosed array, expected `]`\n"
+)]
+#[case::absolute_exclude(
+    &[("p/src/lib.rs", Content::Text("")), ("samlinter.toml", excluding("\"/ws/p\""))],
+    "invalid samlinter.toml: TOML parse error at line 3, column 11\n  |\n3 | exclude = [\"/ws/p\"]\n  |           ^^^^^^^^^\n`exclude` entry `/ws/p` is absolute; write it relative to the workspace root\n"
+)]
+#[case::exclude_above_the_root(
+    &[("p/src/lib.rs", Content::Text("")), ("samlinter.toml", excluding("\"..\""))],
+    "invalid samlinter.toml: TOML parse error at line 3, column 11\n  |\n3 | exclude = [\"..\"]\n  |           ^^^^^^\n`exclude` entry `..` climbs above the workspace root\n"
+)]
+#[case::exclude_climbing_out_and_back(
+    &[("p/src/lib.rs", Content::Text("")), ("samlinter.toml", excluding("\"p/../../ws/p\""))],
+    "invalid samlinter.toml: TOML parse error at line 3, column 11\n  |\n3 | exclude = [\"p/../../ws/p\"]\n  |           ^^^^^^^^^^^^^^^^\n`exclude` entry `p/../../ws/p` climbs above the workspace root\n"
+)]
+// The disk checks of an entry live in `exclude`; this pins that the load names the config.
+#[case::exclude_naming_nothing(
+    &[("p/src/lib.rs", Content::Text("")), ("samlinter.toml", excluding("\"p/gone\""))],
+    "invalid samlinter.toml: `exclude` entry `p/gone` names no file or directory"
 )]
 fn load_errors_name_the_file(#[case] files: &[(&str, Content)], #[case] expected: &str) {
     let error = load_p(files).err().unwrap();
@@ -550,11 +655,26 @@ fn load_errors_name_the_file(#[case] files: &[(&str, Content)], #[case] expected
 }
 
 #[rstest]
-#[case::manifest_without_a_parent("/", &[], "/ has no parent directory")]
-#[case::target_root_naming_no_file(
+#[case::manifest_naming_the_filesystem_root("/", &[], "cannot read /: is a directory")]
+#[case::target_root_naming_the_filesystem_root(
+    "/ws/p/Cargo.toml",
+    &["/ws/.."],
+    "cannot read /: is a directory"
+)]
+#[case::target_root_ending_in_dot_dot(
     "/ws/p/Cargo.toml",
     &["/ws/p/src/.."],
-    "/ws/p/src/.. names no file"
+    "cannot read p/src/..: entity not found"
+)]
+#[case::absent_target_root(
+    "/ws/p/Cargo.toml",
+    &["/ws/p/lib.rs"],
+    "cannot read p/lib.rs: entity not found"
+)]
+#[case::target_root_in_an_absent_directory(
+    "/ws/p/Cargo.toml",
+    &["/ws/p/gone/lib.rs"],
+    "cannot read p/gone/lib.rs: entity not found"
 )]
 fn unusable_metadata_paths_are_errors(
     #[case] manifest_path: &str,
@@ -582,23 +702,88 @@ fn unusable_metadata_paths_are_errors(
     assert_eq!(format!("{error:#}"), expected);
 }
 
+/// The root manifest is read on its own, as a root package's manifest or a virtual root's.
+#[rstest]
+#[case::root_package(
+    &[
+        ("Cargo.toml", Content::Link),
+        ("real/Cargo.toml", Content::Text("[package]\n")),
+        ("src/main.rs", Content::Text("fn main() {}\n")),
+    ],
+    &["Cargo.toml"]
+)]
+#[case::virtual_root(
+    &[
+        ("Cargo.toml", Content::Link),
+        ("real/Cargo.toml", Content::Text("[workspace]\n")),
+        ("p/Cargo.toml", Content::Text("")),
+        ("p/src/lib.rs", Content::Text("")),
+    ],
+    &["p/Cargo.toml"]
+)]
+fn linked_root_manifest_stops_the_run(
+    #[case] files: &[(&str, Content)],
+    #[case] manifests: &[&str],
+) {
+    let error = load(files, manifests).err().unwrap();
+    assert_eq!(
+        format!("{error:#}"),
+        "Cargo.toml: samlinter does not follow symlinks"
+    );
+}
+
+/// A member directory cargo reports is a link: the walk stops at it before reading below.
 #[test]
-#[should_panic(expected = "/ws/a.rs holds entries but is no directory")]
-fn memory_holds_no_entry_below_a_file() {
-    Memory::new([
-        (PathBuf::from("/ws/a.rs"), Content::Text("")),
-        (PathBuf::from("/ws/a.rs/b.rs"), Content::Text("")),
-    ]);
+fn linked_member_directory_stops_the_run() {
+    let files = [
+        ("m", Content::Link),
+        ("real/Cargo.toml", Content::Text("")),
+        ("real/src/lib.rs", Content::Text("")),
+    ];
+    let error = load(&files, &["m/Cargo.toml"]).err().unwrap();
+    assert_eq!(
+        format!("{error:#}"),
+        "m: samlinter does not follow symlinks"
+    );
+}
+
+/// Every package's module walk runs before any manifest is read, so a module error, in the same
+/// package or a later one, comes before an unreadable manifest.
+#[rstest]
+#[case::module_error_before_its_own_manifest(
+    &[
+        ("a/Cargo.toml", Content::NotUtf8),
+        ("a/src/lib.rs", Content::Text("mod gone;\n")),
+    ],
+    &["a/Cargo.toml"],
+    "a/src/lib.rs:1: no file for `mod gone;`, tried a/src/gone.rs, a/src/gone/mod.rs"
+)]
+#[case::later_module_error_before_an_earlier_manifest(
+    &[
+        ("a/Cargo.toml", Content::NotUtf8),
+        ("a/src/lib.rs", Content::Text("")),
+        ("b/Cargo.toml", Content::Text("")),
+        ("b/src/lib.rs", Content::Text("mod gone;\n")),
+    ],
+    &["a/Cargo.toml", "b/Cargo.toml"],
+    "b/src/lib.rs:1: no file for `mod gone;`, tried b/src/gone.rs, b/src/gone/mod.rs"
+)]
+fn first_error_stops_the_load(
+    #[case] files: &[(&str, Content)],
+    #[case] manifests: &[&str],
+    #[case] expected: &str,
+) {
+    let error = load(files, manifests).err().unwrap();
+    assert_eq!(format!("{error:#}"), expected);
 }
 
 #[test]
-fn two_packages_resolving_to_one_manifest_are_an_error() {
+fn two_packages_on_one_manifest_are_an_error() {
     let files = [
         ("p/Cargo.toml", Content::Text("")),
         ("p/src/lib.rs", Content::Text("")),
-        ("q/Cargo.toml", Content::Link("p/Cargo.toml")),
     ];
-    let error = load(&files, &["p/Cargo.toml", "q/Cargo.toml"])
+    let error = load(&files, &["p/Cargo.toml", "p/Cargo.toml"])
         .err()
         .unwrap();
     assert_eq!(
@@ -608,16 +793,15 @@ fn two_packages_resolving_to_one_manifest_are_an_error() {
 }
 
 #[test]
-fn root_named_through_dot_dot_shows_paths_relative_to_its_canonical_form() {
+fn root_named_through_dot_dot_shows_paths_relative_to_its_normalized_form() {
     let files = [
         ("p/Cargo.toml", Content::Text("")),
         ("p/src/lib.rs", Content::Text("")),
     ];
     let workspace = load_from(
         Path::new("/ws/p/.."),
-        Edition::Edition2024,
         &files,
-        &["p/Cargo.toml"],
+        &[("p/Cargo.toml", Edition::Edition2024)],
     )
     .unwrap();
     assert_eq!(
@@ -632,29 +816,452 @@ fn root_named_through_dot_dot_shows_paths_relative_to_its_canonical_form() {
     );
 }
 
-/// - Cargo names a package by the directory of its manifest path as given, link included.
-/// - So the README a binary needs sits beside the link, and the finding names that path.
+/// What `Above` answers for one path at or above the root, in place of `Memory`.
+type Given = (&'static str, Result<Unfollowed, io::ErrorKind>);
+
+/// - A `Memory` whose `given` paths, the workspace root `/ws/root` or directories above it,
+///   answer as listed.
+/// - `Memory` holds no entry below a link, so this stub answers for those paths.
+struct Above {
+    memory: Memory,
+    given: &'static [Given],
+}
+
+impl Files for Above {
+    fn read(&self, path: &Path) -> io::Result<String> {
+        self.memory.read(path)
+    }
+
+    fn entry(&self, path: &Path) -> io::Result<Unfollowed> {
+        self.given
+            .iter()
+            .find(|(given, _)| Path::new(given) == path)
+            .map_or_else(
+                || self.memory.entry(path),
+                |(_, answer)| answer.map_err(io::Error::from),
+            )
+    }
+}
+
+const LINKED_ROOT: &[Given] = &[("/ws/root", Ok(Unfollowed::Symlink))];
+
+const LINKED_ANCESTOR: &[Given] = &[("/ws", Ok(Unfollowed::Symlink))];
+
+/// - Loads the workspace `/ws/root` on `Above` answering `given`.
+/// - Its one package has the manifest `manifest` and the target roots `roots`; `p/src/lib.rs`
+///   holds `lib`.
+fn load_above(
+    given: &'static [Given],
+    lib: &'static str,
+    manifest: &str,
+    roots: &[&str],
+) -> Result<Workspace> {
+    let memory = Memory::new(
+        [
+            ("root/Cargo.toml", Content::Text("[workspace]\n")),
+            ("root/samlinter.toml", Content::Text(CONFIG)),
+            ("root/p/Cargo.toml", Content::Text("")),
+            ("root/p/src/lib.rs", Content::Text(lib)),
+            (
+                "root/p/src/a.rs",
+                Content::Text("#[path = \"../../../x.rs\"]\nmod x;\n"),
+            ),
+            ("root/p/src/y.rs", Content::Text("")),
+            ("root/p/src/real/n.rs", Content::Text("")),
+            ("root/p/src/empty/other.rs", Content::Text("")),
+            ("x.rs", Content::Text("")),
+            ("n.rs", Content::Text("")),
+        ]
+        .map(|(path, content)| (Path::new(ROOT).join(path), content)),
+    );
+    let package = PackageMetadata {
+        manifest_path: PathBuf::from(manifest),
+        kind: PackageKind::Library,
+        edition: Edition::Edition2024,
+        dependencies: Vec::new(),
+        roots: roots.iter().map(PathBuf::from).collect(),
+    };
+    assemble(
+        &Above { memory, given },
+        Path::new("/ws/root"),
+        vec![package],
+    )
+}
+
+/// `render`, then every warning as output shows it.
+fn render_with_warnings(workspace: &Workspace) -> (Vec<String>, Vec<String>) {
+    (
+        render(workspace),
+        workspace.warnings.iter().map(ToString::to_string).collect(),
+    )
+}
+
+const NOT_FOLLOWED: &str =
+    "`#[path]` climbs above the symlinked workspace root; module not followed";
+
+/// - The root `/ws/root` and its ancestors are taken as given, never looked up on the way in.
+/// - A `..` leaving one of them that is a symlink would lead where the link points, so the
+///   module is not followed and a warning names its declaration.
+/// - Leaving a directory that is no symlink resolves as written, also above the root.
+#[rstest]
+#[case::leaving_the_linked_root(
+    LINKED_ROOT,
+    "#[path = \"../../../x.rs\"]\nmod x;\n",
+    &[],
+    &["p/src/lib.rs:2"]
+)]
+#[case::leaving_a_linked_ancestor(
+    LINKED_ANCESTOR,
+    "#[path = \"../../../../x.rs\"]\nmod x;\n",
+    &[],
+    &["p/src/lib.rs:2"]
+)]
+#[case::below_a_linked_ancestor(
+    LINKED_ANCESTOR,
+    "#[path = \"../../../x.rs\"]\nmod x;\n",
+    &["p/Cargo.toml: /ws/x.rs"],
+    &[]
+)]
+#[case::nothing_linked(
+    &[],
+    "#[path = \"../../../x.rs\"]\nmod x;\n",
+    &["p/Cargo.toml: /ws/x.rs"],
+    &[]
+)]
+#[case::cfg_attr_path_with_the_default_file_missing(
+    LINKED_ROOT,
+    "#[cfg_attr(unix, path = \"../../../x.rs\")]\nmod x;\n",
+    &[],
+    &["p/src/lib.rs:2"]
+)]
+#[case::cfg_attr_path_beside_the_default_file(
+    LINKED_ROOT,
+    "#[cfg_attr(unix, path = \"../../../x.rs\")]\nmod y;\n",
+    &["p/Cargo.toml: p/src/y.rs"],
+    &["p/src/lib.rs:2"]
+)]
+#[case::inline_module_directory(
+    LINKED_ROOT,
+    "#[path = \"../../..\"]\nmod m {\n    mod n;\n}\n",
+    &[],
+    &["p/src/lib.rs:3"]
+)]
+// The climbing candidates come first, then a found one, then a missing one.
+#[case::climbing_directory_then_a_cfg_attr_directory_holding_the_file(
+    LINKED_ROOT,
+    "#[cfg_attr(unix, path = \"real\")]\n#[path = \"../../..\"]\nmod m {\n    mod n;\n}\n",
+    &["p/Cargo.toml: p/src/real/n.rs"],
+    &["p/src/lib.rs:4"]
+)]
+// The climbing candidates come first, then only missing ones: a warning, never an error.
+#[case::climbing_directory_then_an_empty_cfg_attr_directory(
+    LINKED_ROOT,
+    "#[cfg_attr(unix, path = \"empty\")]\n#[path = \"../../..\"]\nmod m {\n    mod n;\n}\n",
+    &[],
+    &["p/src/lib.rs:4"]
+)]
+// - `a.rs` is reached twice, as `a.rs` and through `#[path]`, and warns once.
+// - Its warning sorts before the one `lib.rs`, read first, gives.
+#[case::warnings_sorted_and_each_once(
+    LINKED_ROOT,
+    "mod a;\n#[path = \"a.rs\"]\nmod again;\n#[path = \"../../../x.rs\"]\nmod x;\n",
+    &["p/Cargo.toml: p/src/a.rs"],
+    &["p/src/a.rs:2", "p/src/lib.rs:5"]
+)]
+fn path_climbing_out_of_a_linked_root_is_not_followed(
+    #[case] given: &'static [Given],
+    #[case] lib: &'static str,
+    #[case] reached: &[&str],
+    #[case] warned: &[&str],
+) {
+    let workspace = load_above(
+        given,
+        lib,
+        "/ws/root/p/Cargo.toml",
+        &["/ws/root/p/src/lib.rs"],
+    )
+    .unwrap();
+    // `render` orders a package's files by their absolute path.
+    let mut sources: Vec<&str> = ["p/Cargo.toml: p/src/lib.rs"]
+        .into_iter()
+        .chain(reached.iter().copied())
+        .collect();
+    sources.sort_by_key(|line| {
+        line.split_once(": ")
+            .map(|(_, shown)| Path::new("/ws/root").join(shown))
+    });
+    let expected: Vec<String> = ["virtual: Cargo.toml"]
+        .into_iter()
+        .chain(sources)
+        .map(ToString::to_string)
+        .collect();
+    let warnings: Vec<String> = warned
+        .iter()
+        .map(|place| format!("{place}: {NOT_FOLLOWED}"))
+        .collect();
+    assert_eq!(render_with_warnings(&workspace), (expected, warnings));
+}
+
+/// A path cargo reports that climbs out of the linked root is not followed either.
+#[rstest]
+#[case::target_root(
+    "/ws/root/p/Cargo.toml",
+    &["/ws/root/p/src/lib.rs", "/ws/root/p/../../x.rs"],
+    &["virtual: Cargo.toml", "p/Cargo.toml: p/src/lib.rs"],
+    "p/../../x.rs"
+)]
+#[case::manifest(
+    "/ws/root/p/../../root/p/Cargo.toml",
+    &["/ws/root/p/src/lib.rs"],
+    &["virtual: Cargo.toml"],
+    "p/../../root/p/Cargo.toml"
+)]
+fn cargo_path_climbing_out_of_a_linked_root_is_not_followed(
+    #[case] manifest: &str,
+    #[case] roots: &[&str],
+    #[case] reached: &[&str],
+    #[case] warned: &str,
+) {
+    let workspace = load_above(LINKED_ROOT, "", manifest, roots).unwrap();
+    assert_eq!(
+        render_with_warnings(&workspace),
+        (
+            reached.iter().map(ToString::to_string).collect(),
+            vec![format!(
+                "{warned}: climbs above the symlinked workspace root; not followed"
+            )]
+        )
+    );
+}
+
+/// - A `..` leaving the root or a directory above it looks that directory up.
+/// - It must still be a directory; a failed lookup names it.
+#[rstest]
+#[case::root_is_a_file(
+    &[("/ws/root", Ok(Unfollowed::File))],
+    "#[path = \"../../../x.rs\"]\nmod x;\n",
+    ".: the workspace root or a directory above it is not a directory"
+)]
+#[case::ancestor_is_gone(
+    &[("/ws", Ok(Unfollowed::Neither))],
+    "#[path = \"../../../../x.rs\"]\nmod x;\n",
+    "/ws: the workspace root or a directory above it is not a directory"
+)]
+#[case::root_cannot_be_inspected(
+    &[("/ws/root", Err(io::ErrorKind::PermissionDenied))],
+    "#[path = \"../../../x.rs\"]\nmod x;\n",
+    "cannot inspect .: permission denied"
+)]
+#[case::ancestor_cannot_be_inspected(
+    &[("/ws", Err(io::ErrorKind::PermissionDenied))],
+    "#[path = \"../../../../x.rs\"]\nmod x;\n",
+    "cannot inspect /ws: permission denied"
+)]
+fn leaving_the_root_or_an_ancestor_needs_a_directory(
+    #[case] given: &'static [Given],
+    #[case] lib: &'static str,
+    #[case] expected: &str,
+) {
+    let error = load_above(
+        given,
+        lib,
+        "/ws/root/p/Cargo.toml",
+        &["/ws/root/p/src/lib.rs"],
+    )
+    .err()
+    .unwrap();
+    assert_eq!(format!("{error:#}"), expected);
+}
+
+/// `samlinter.toml` with no forbidden words and no subscriber crates, excluding `entries`.
+fn excluding(entries: &str) -> Content {
+    Content::Text(format!("{CONFIG}exclude = [{entries}]\n").leak())
+}
+
+/// An excluded Rust file is never read, so neither its text nor its `mod` declarations matter.
+#[rstest]
+#[case::directory(
+    &[
+        ("samlinter.toml", excluding("\"p/src/generated\"")),
+        ("p/src/lib.rs", Content::Text("mod generated;\nmod kept;\n")),
+        ("p/src/generated/mod.rs", Content::NotUtf8),
+        ("p/src/kept.rs", Content::Text("")),
+    ],
+    &["virtual: Cargo.toml", "p/Cargo.toml: p/src/kept.rs", "p/Cargo.toml: p/src/lib.rs"]
+)]
+#[case::file_whose_modules_are_not_followed(
+    &[
+        ("samlinter.toml", excluding("\"p/src/generated.rs\"")),
+        ("p/src/lib.rs", Content::Text("mod generated;\n")),
+        ("p/src/generated.rs", Content::Text("mod gone;\n")),
+    ],
+    &["virtual: Cargo.toml", "p/Cargo.toml: p/src/lib.rs"]
+)]
+#[case::target_root(
+    &[
+        ("samlinter.toml", excluding("\"p/src/lib.rs\"")),
+        ("p/src/lib.rs", Content::NotUtf8),
+    ],
+    &["virtual: Cargo.toml"]
+)]
+#[case::entry_through_dot_dot(
+    &[
+        ("samlinter.toml", excluding("\"p/src/../src/generated.rs\"")),
+        ("p/src/lib.rs", Content::Text("mod generated;\n")),
+        ("p/src/generated.rs", Content::NotUtf8),
+    ],
+    &["virtual: Cargo.toml", "p/Cargo.toml: p/src/lib.rs"]
+)]
+#[case::sibling_sharing_a_prefix_is_kept(
+    &[
+        ("samlinter.toml", excluding("\"p/src/gen\"")),
+        ("p/src/lib.rs", Content::Text("mod generated;\n")),
+        ("p/src/gen", Content::Directory),
+        ("p/src/generated.rs", Content::Text("")),
+    ],
+    &["virtual: Cargo.toml", "p/Cargo.toml: p/src/generated.rs", "p/Cargo.toml: p/src/lib.rs"]
+)]
+// The lookup stops at the excluded directory: a symlink below it is never met.
+#[case::symlink_below_an_excluded_directory(
+    &[
+        ("samlinter.toml", excluding("\"p/src/generated\"")),
+        ("p/src/lib.rs", Content::Text("mod generated;\n")),
+        ("p/src/generated/mod.rs", Content::Link),
+    ],
+    &["virtual: Cargo.toml", "p/Cargo.toml: p/src/lib.rs"]
+)]
+#[case::denied_directory_below_an_excluded_one(
+    &[
+        ("samlinter.toml", excluding("\"p/src/generated\"")),
+        ("p/src/lib.rs", Content::Text("#[path = \"generated/f/x.rs\"]\nmod x;\n")),
+        ("p/src/generated/f", Content::Forbidden),
+    ],
+    &["virtual: Cargo.toml", "p/Cargo.toml: p/src/lib.rs"]
+)]
+// The first written component an entry covers ends the lookup, a later `..` included.
+#[case::path_through_an_excluded_directory(
+    &[
+        ("samlinter.toml", excluding("\"p/src/generated\"")),
+        ("p/src/lib.rs", Content::Text("#[path = \"generated/../kept.rs\"]\nmod kept;\n")),
+        ("p/src/generated/other.rs", Content::Text("")),
+        ("p/src/kept.rs", Content::Text("")),
+    ],
+    &["virtual: Cargo.toml", "p/Cargo.toml: p/src/lib.rs"]
+)]
+#[case::inline_module_directory(
+    &[
+        ("samlinter.toml", excluding("\"p/src/generated\"")),
+        ("p/src/lib.rs", Content::Text("#[path = \"generated\"]\nmod m {\n    mod n;\n}\n")),
+        ("p/src/generated/n.rs", Content::NotUtf8),
+    ],
+    &["virtual: Cargo.toml", "p/Cargo.toml: p/src/lib.rs"]
+)]
+fn excluded_sources_are_not_read(#[case] files: &[(&str, Content)], #[case] expected: &[&str]) {
+    assert_eq!(render(&load_p(files).unwrap()), expected);
+}
+
+/// No rule reports a finding in an excluded file: manifests, READMEs and `samlinter.toml` are
+/// still read, their findings dropped.
+#[rstest]
+#[case::nothing_excluded(
+    "",
+    &[
+        "Cargo.toml: panic_strategy: no `[profile.dev]` with `panic = \"abort\"`",
+        "Cargo.toml: panic_strategy: no `[profile.release]` with `panic = \"abort\"`",
+        "README.md:1:3: em_dash: em-dash (U+2014)",
+        "p/Cargo.toml:1:2: feature_flags: `[features]` table",
+        "p/README.md:1:3: em_dash: em-dash (U+2014)",
+        "p/src/lib.rs:1:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy",
+        "samlinter.toml:1:5: em_dash: em-dash (U+2014)",
+    ]
+)]
+#[case::root_manifest(
+    "\"Cargo.toml\"",
+    &[
+        "README.md:1:3: em_dash: em-dash (U+2014)",
+        "p/Cargo.toml:1:2: feature_flags: `[features]` table",
+        "p/README.md:1:3: em_dash: em-dash (U+2014)",
+        "p/src/lib.rs:1:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy",
+        "samlinter.toml:1:5: em_dash: em-dash (U+2014)",
+    ]
+)]
+#[case::member_manifest(
+    "\"p/Cargo.toml\"",
+    &[
+        "Cargo.toml: panic_strategy: no `[profile.dev]` with `panic = \"abort\"`",
+        "Cargo.toml: panic_strategy: no `[profile.release]` with `panic = \"abort\"`",
+        "README.md:1:3: em_dash: em-dash (U+2014)",
+        "p/README.md:1:3: em_dash: em-dash (U+2014)",
+        "p/src/lib.rs:1:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy",
+        "samlinter.toml:1:5: em_dash: em-dash (U+2014)",
+    ]
+)]
+#[case::readmes_and_config(
+    "\"README.md\", \"p/README.md\", \"samlinter.toml\"",
+    &[
+        "Cargo.toml: panic_strategy: no `[profile.dev]` with `panic = \"abort\"`",
+        "Cargo.toml: panic_strategy: no `[profile.release]` with `panic = \"abort\"`",
+        "p/Cargo.toml:1:2: feature_flags: `[features]` table",
+        "p/src/lib.rs:1:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy",
+    ]
+)]
+#[case::package_directory(
+    "\"p\"",
+    &[
+        "Cargo.toml: panic_strategy: no `[profile.dev]` with `panic = \"abort\"`",
+        "Cargo.toml: panic_strategy: no `[profile.release]` with `panic = \"abort\"`",
+        "README.md:1:3: em_dash: em-dash (U+2014)",
+        "samlinter.toml:1:5: em_dash: em-dash (U+2014)",
+    ]
+)]
+#[case::the_whole_root("\".\"", &[])]
+fn excluded_files_get_no_findings(#[case] entries: &str, #[case] expected: &[&str]) {
+    let config = format!("# a \u{2014}\n{CONFIG}exclude = [{entries}]\n");
+    let files = [
+        ("samlinter.toml", Content::Text(config.leak())),
+        ("README.md", Content::Text("a \u{2014}\n")),
+        ("p/Cargo.toml", Content::Text("[features]\n")),
+        ("p/README.md", Content::Text("a \u{2014}\n")),
+        ("p/src/lib.rs", Content::Text("pub(crate) fn f() {}\n")),
+    ];
+    let workspace = load(&files, &["p/Cargo.toml"]).unwrap();
+    let findings: Vec<String> = check::run(&workspace)
+        .unwrap()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(findings, expected);
+}
+
+/// `exclude = ["."]` covers the root, never a member outside it.
+#[test]
+fn excluding_the_root_keeps_files_outside_it() {
+    let files = [
+        ("samlinter.toml", excluding("\".\"")),
+        ("/elsewhere/Cargo.toml", Content::Text("[features]\n")),
+        (
+            "/elsewhere/src/lib.rs",
+            Content::Text("pub(crate) fn f() {}\n"),
+        ),
+    ];
+    let workspace = load(&files, &["/elsewhere/Cargo.toml"]).unwrap();
+    let findings: Vec<String> = check::run(&workspace)
+        .unwrap()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            "/elsewhere/Cargo.toml:1:2: feature_flags: `[features]` table",
+            "/elsewhere/src/lib.rs:1:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy",
+        ]
+    );
+}
+
+/// - The README a binary needs sits beside its manifest, and the finding names that path.
 /// - Outside the root, the path shows absolute, like every path there.
 #[rstest]
-#[case::beside_a_symlinked_member_manifest(
-    &[
-        ("m/Cargo.toml", Content::Link("real/Cargo.toml")),
-        ("real/Cargo.toml", Content::Text("")),
-        ("real/README.md", Content::Text("")),
-        ("m/src/main.rs", Content::Text("fn main() {}\n")),
-    ],
-    "m/Cargo.toml",
-    "real/Cargo.toml: binary_readme: binary package has no README at m/README.md"
-)]
-#[case::readme_that_is_a_broken_symlink(
-    &[
-        ("m/Cargo.toml", Content::Text("")),
-        ("m/src/main.rs", Content::Text("fn main() {}\n")),
-        ("m/README.md", Content::Link("m/nowhere.md")),
-    ],
-    "m/Cargo.toml",
-    "m/Cargo.toml: binary_readme: binary package has no README at m/README.md"
-)]
 #[case::package_outside_the_root(
     &[
         ("/elsewhere/Cargo.toml", Content::Text("")),
@@ -669,8 +1276,7 @@ fn missing_binary_readme_is_named_where_it_belongs(
     #[case] expected: &str,
 ) {
     let workspace = load(files, &[manifest]).unwrap();
-    let config = Config::parse(CONFIG).unwrap();
-    let findings: Vec<String> = check::run(&workspace, &config)
+    let findings: Vec<String> = check::run(&workspace)
         .unwrap()
         .iter()
         .filter(|finding| finding.rule == Rule::BinaryReadme)
@@ -679,18 +1285,61 @@ fn missing_binary_readme_is_named_where_it_belongs(
     assert_eq!(findings, [expected]);
 }
 
+/// `a/src/x.rs` is owned by `a` and reached from `b` too; it parses with its owner's edition.
+#[rstest]
+#[case::owner_on_2024(
+    Edition::Edition2024,
+    Edition::Edition2021,
+    &["a/src/x.rs:2:9: syntax_error: expected pattern"]
+)]
+#[case::owner_on_2021(Edition::Edition2021, Edition::Edition2024, &[])]
+fn shared_file_parses_with_its_owners_edition(
+    #[case] owner: Edition,
+    #[case] other: Edition,
+    #[case] expected: &[&str],
+) {
+    let files = [
+        ("a/Cargo.toml", Content::Text("")),
+        ("a/src/lib.rs", Content::Text("mod x;\n")),
+        (
+            "a/src/x.rs",
+            Content::Text("fn f() {\n    let gen = 1;\n}\n"),
+        ),
+        ("b/Cargo.toml", Content::Text("")),
+        (
+            "b/src/lib.rs",
+            Content::Text("#[path = \"../../a/src/x.rs\"]\nmod x;\n"),
+        ),
+    ];
+    let workspace = load_from(
+        Path::new(ROOT),
+        &files,
+        &[("a/Cargo.toml", owner), ("b/Cargo.toml", other)],
+    )
+    .unwrap();
+    let findings: Vec<String> = check::run(&workspace)
+        .unwrap()
+        .iter()
+        .filter(|finding| finding.path == Path::new("a/src/x.rs"))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(findings, expected);
+}
+
 /// A `mod` with neither `;` nor `{ }` names no file to find; the source check reports it.
 #[test]
 fn module_missing_its_semicolon_is_a_syntax_error() {
     let workspace = load_p(&[("p/src/lib.rs", Content::Text("mod gone\n"))]).unwrap();
-    let config = Config::parse(CONFIG).unwrap();
-    let rules: Vec<Rule> = check::run(&workspace, &config)
+    let findings: Vec<String> = check::run(&workspace)
         .unwrap()
         .iter()
         .filter(|finding| finding.path == Path::new("p/src/lib.rs"))
-        .map(|finding| finding.rule)
+        .map(ToString::to_string)
         .collect();
-    assert_eq!(rules, [Rule::SyntaxError]);
+    assert_eq!(
+        findings,
+        ["p/src/lib.rs:1:9: syntax_error: expected `;` or `{`"]
+    );
 }
 
 #[test]
@@ -705,11 +1354,11 @@ fn config_is_read_from_the_root() {
 #[rstest]
 #[case::absent(
     None,
-    "cannot read /ws/samlinter.toml; every workspace needs one, see the README: entity not found"
+    "cannot read samlinter.toml; every workspace needs one, see the README: entity not found"
 )]
 #[case::unreadable(
     Some(Content::Directory),
-    "cannot read /ws/samlinter.toml; every workspace needs one, see the README: is a directory"
+    "cannot read samlinter.toml; every workspace needs one, see the README: is a directory"
 )]
 fn config_errors_name_the_file(#[case] config: Option<Content>, #[case] expected: &str) {
     let memory = Memory::new(
@@ -820,7 +1469,7 @@ fn package_metadata_reads_kind_edition_and_target_roots(
     #[case] expected_edition: Edition,
     #[case] roots: &[&str],
 ) {
-    let metadata = package_metadata(&cargo_package(edition, targets)).unwrap();
+    let metadata = package_metadata(Path::new(ROOT), &cargo_package(edition, targets)).unwrap();
     let expected_roots: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
     assert_eq!(metadata.manifest_path, PathBuf::from("/ws/p/Cargo.toml"));
     assert_eq!(metadata.kind, kind);
@@ -862,18 +1511,6 @@ fn dependency_keeps_key_crate_name_section_and_platform(
 }
 
 #[rstest]
-#[case::inside_the_root("/ws/lib/src/lib.rs", "lib/src/lib.rs")]
-#[case::the_root_manifest("/ws/Cargo.toml", "Cargo.toml")]
-#[case::member_outside_the_root("/elsewhere/src/lib.rs", "/elsewhere/src/lib.rs")]
-#[case::sibling_with_a_shared_prefix("/ws2/src/lib.rs", "/ws2/src/lib.rs")]
-fn paths_are_relative_to_the_root_when_inside_it(#[case] path: &str, #[case] expected: &str) {
-    assert_eq!(
-        relative(Path::new("/ws"), Path::new(path)),
-        PathBuf::from(expected)
-    );
-}
-
-#[rstest]
 #[case::edition_2015("2015", Edition::Edition2015)]
 #[case::edition_2018("2018", Edition::Edition2018)]
 #[case::edition_2021("2021", Edition::Edition2021)]
@@ -889,145 +1526,4 @@ fn unknown_edition_asks_for_an_upgrade() {
         error.to_string(),
         "lib/Cargo.toml: edition 2099 is newer than this samlinter understands; upgrade samlinter"
     );
-}
-
-/// The files both `Files` implementations hold for the contract, by path relative to the root.
-const CONTRACT_FILES: &[(&str, Lasting)] = &[
-    ("text.rs", Lasting::Text("text")),
-    ("link.rs", Lasting::Link("text.rs")),
-    ("broken.rs", Lasting::Link("nowhere.rs")),
-    ("dir/inner.rs", Lasting::Text("")),
-    ("empty", Lasting::Directory),
-    ("bad.rs", Lasting::NotUtf8),
-];
-
-/// What a `Files` implementation answers for one path: paths relative to the root, errors by
-/// kind.
-#[derive(Debug, PartialEq, Eq)]
-struct Answers {
-    read: Result<String, io::ErrorKind>,
-    canonicalize: Result<PathBuf, io::ErrorKind>,
-    is_file: bool,
-}
-
-fn answers(
-    read: Result<&str, io::ErrorKind>,
-    canonicalize: Result<&str, io::ErrorKind>,
-    is_file: bool,
-) -> Answers {
-    Answers {
-        read: read.map(str::to_owned),
-        canonicalize: canonicalize.map(PathBuf::from),
-        is_file,
-    }
-}
-
-/// Every path the contract asks about, with the answers the disk gives.
-fn contract() -> Vec<(&'static str, Answers)> {
-    let not_found = io::ErrorKind::NotFound;
-    let not_a_directory = io::ErrorKind::NotADirectory;
-    vec![
-        ("text.rs", answers(Ok("text"), Ok("text.rs"), true)),
-        ("link.rs", answers(Ok("text"), Ok("text.rs"), true)),
-        ("dir/../text.rs", answers(Ok("text"), Ok("text.rs"), true)),
-        (
-            "dir",
-            answers(Err(io::ErrorKind::IsADirectory), Ok("dir"), false),
-        ),
-        (
-            "empty",
-            answers(Err(io::ErrorKind::IsADirectory), Ok("empty"), false),
-        ),
-        ("missing.rs", answers(Err(not_found), Err(not_found), false)),
-        ("broken.rs", answers(Err(not_found), Err(not_found), false)),
-        (
-            "gone/../text.rs",
-            answers(Err(not_found), Err(not_found), false),
-        ),
-        (
-            "text.rs/x",
-            answers(Err(not_a_directory), Err(not_a_directory), false),
-        ),
-        (
-            "bad.rs",
-            answers(Err(io::ErrorKind::InvalidData), Ok("bad.rs"), true),
-        ),
-    ]
-}
-
-/// What `files` answers for every path of the contract, under `root`.
-fn ask(files: &impl Files, root: &Path) -> Vec<(&'static str, Answers)> {
-    contract()
-        .into_iter()
-        .map(|(path, _)| {
-            let full = root.join(path);
-            let canonicalize = files
-                .canonicalize(&full)
-                .map(|resolved| resolved.strip_prefix(root).unwrap().to_path_buf());
-            let answers = Answers {
-                read: files.read(&full).map_err(|error| error.kind()),
-                canonicalize: canonicalize.map_err(|error| error.kind()),
-                is_file: files.is_file(&full),
-            };
-            (path, answers)
-        })
-        .collect()
-}
-
-/// Runs its closure when dropped, so cleanup runs even when an assertion fails.
-struct OnDrop<F: FnMut()>(F);
-
-impl<F: FnMut()> Drop for OnDrop<F> {
-    fn drop(&mut self) {
-        (self.0)();
-    }
-}
-
-/// Writes `content` at `path` under `root`; a link's target is relative to `root`, as in
-/// `Memory`.
-fn write_on_disk(root: &Path, path: &str, content: Lasting) {
-    let path = root.join(path);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    match content {
-        Lasting::Text(text) => fs::write(&path, text).unwrap(),
-        Lasting::NotUtf8 => fs::write(&path, [0x80]).unwrap(),
-        Lasting::Directory => fs::create_dir(&path).unwrap(),
-        Lasting::Link(target) => symlink(&root.join(target), &path).unwrap(),
-    }
-}
-
-#[cfg(unix)]
-fn symlink(target: &Path, link: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
-}
-
-#[cfg(windows)]
-fn symlink(target: &Path, link: &Path) -> io::Result<()> {
-    std::os::windows::fs::symlink_file(target, link)
-}
-
-#[test]
-fn disk_keeps_the_files_contract() {
-    let scratch = std::env::temp_dir().join(format!("samlinter-files-contract-{}", process::id()));
-    fs::create_dir(&scratch).unwrap();
-    let _cleanup = OnDrop(|| {
-        fs::remove_dir_all(&scratch)
-            .unwrap_or_else(|error| eprintln!("cannot remove {}: {error}", scratch.display()));
-    });
-    let root = fs::canonicalize(&scratch).unwrap();
-    for (path, content) in CONTRACT_FILES {
-        write_on_disk(&root, path, *content);
-    }
-
-    assert_eq!(ask(&Disk, &root), contract());
-}
-
-#[test]
-fn memory_keeps_the_files_contract() {
-    let memory = Memory::new(
-        CONTRACT_FILES
-            .iter()
-            .map(|(path, content)| (Path::new(ROOT).join(path), Content::from(*content))),
-    );
-    assert_eq!(ask(&memory, Path::new(ROOT)), contract());
 }

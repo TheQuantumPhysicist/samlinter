@@ -3,7 +3,7 @@
 Fails the build on Rust workspace conventions that the compiler and clippy cannot check.
 It parses the Rust sources, `Cargo.toml` and `README.md` of every package in a Cargo
 workspace and prints each violation.
-There are no warnings and no rule switches: any finding fails the run.
+No finding is a mere warning and there are no rule switches: any finding fails the run.
 
 ## Run
 
@@ -19,14 +19,23 @@ samlinter --manifest-path path/to/Cargo.toml
 - Needs `samlinter.toml` at the workspace root (see Configuration).
 - Always checks the whole workspace with the root's `samlinter.toml`, also when run from a
   member directory or given a member's `Cargo.toml`.
+- Every run, `--help` and `--version` included, runs on a thread with a 256 MiB stack, so
+  deeply nested files fit; if the OS refuses that stack (for example under a low
+  `ulimit -v`), samlinter exits 2.
 - Exit status: 0 clean, 1 findings, 2 error, such as bad arguments, an invalid or missing
-  `samlinter.toml`, a failed `cargo metadata`, an unreadable file, a declared module with no
-  file, or output that cannot be written.
+  `samlinter.toml`, such as a bad `exclude` entry, a failed `cargo metadata`, an unreadable
+  file, a declared module with no file, a module path that cannot be inspected (for example
+  behind a directory that may not be searched), a symlink (samlinter does not follow
+  symlinks), output that cannot be written, or a lint thread that cannot start.
+- Warnings go to stderr as `samlinter: warning: ...` and leave the exit status alone.
 
 ## Output
 
 Findings are grouped by rule, one per line as `path:line:column: rule: message`; whole-file
-findings omit the position. Paths are relative to the workspace root, absolute outside it.
+findings omit the position. Paths, in findings, warnings and errors alike, are relative to
+the workspace root (`.` for the root itself), absolute outside it.
+Every file (sources, manifests, READMEs, `samlinter.toml`) is shown by its path with `.`
+and `..` resolved; `binary_readme` names where the missing README belongs.
 Columns count characters; a byte order mark starting the file
 takes none. The finding count goes to stderr. Each group ends with three
 indented sections that tell whoever fixes the finding what to do:
@@ -61,19 +70,38 @@ Rust sources are found the way the compiler finds them, not by listing directori
 - cfg is not evaluated: every declared module is checked, test modules included, and each
   `#[cfg_attr(.., path = "..")]` file or inline module directory too. Like the compiler,
   only the first `path` attribute counts, so one after an unconditional `#[path]` is
-  skipped.
+  skipped. An inline module's `cfg_attr` `path` directory that does not exist is not
+  entered, and each directory is entered once however it is spelled.
+- Symlinks are not followed: a file or directory samlinter reads or enters that is a
+  symlink stops the run (exit 2), naming it. That holds wherever it sits: module files and
+  directories, `#[path]` targets, the manifests and target roots cargo reports, READMEs and
+  `samlinter.toml`. The workspace root and the directories above it are taken as given.
+- `.` and `..` resolve without reading the disk, each name checked for a symlink before a
+  `..` leaves it.
+- A `#[path]`, or a `cfg_attr` path, whose `..` leaves a workspace root or a directory above
+  it that is a symlink would lead where the link points. samlinter does not follow that
+  module: it prints `samlinter: warning: <file>:<line>: ...` on stderr, naming the
+  declaration, and the exit status stays what the findings make it. Other candidate files
+  of the same module are still followed.
+- A target root or manifest cargo reports that climbs out of a symlinked root that way is
+  not followed either, with a warning naming the path; for a manifest, the whole package.
+- A `..` leaving the workspace root or a directory above it that is no directory anymore is
+  an error naming it.
+- A path ending in `/` or `/.` names a directory, so no module file is there, as for rustc.
 - A declared module with no file on disk is an error that names the declaration and the
-  paths tried.
-- Each file is checked once, even when `#[path]` or a symlink reaches it twice, and is
-  reported by its real path, with `..` and symlinks resolved. Its `mod` declarations are
-  followed from every route that reaches it: as `a.rs` they resolve under `a/`, through
-  `#[path]` beside the file.
+  paths tried, always including where the module sits with no cfg set. No file means
+  nothing there: a missing path, a path below a file, a name too long to exist, or
+  something that is neither a file nor a directory (a socket, FIFO or device). Unlike the
+  compiler, which reads every failed lookup as absent, any other failure, a denied
+  permission included, is an error.
+- Each file is checked once, even when `#[path]` reaches it twice, and is reported by its
+  path with `.` and `..` resolved. Its `mod` declarations are followed from every route that
+  reaches it: as `a.rs` they resolve under `a/`, through `#[path]` beside the file.
 - A file several packages reach belongs to the one whose directory holds it, the innermost
-  when packages nest; a file outside them all goes to the lowest manifest path. A package's
-  directory is where cargo finds its `Cargo.toml`, also when that is a symlink. The file is
+  when packages nest; a file outside them all goes to the lowest manifest path. The file is
   parsed with that package's edition.
 - Files outside the module tree, such as build output or a stray `.rs` file nothing
-  declares, are never read.
+  declares, are never read; neither are excluded files (see Configuration).
 - Not seen: files pulled in with `include!`, modules declared inside macro bodies or
   function bodies.
 
@@ -124,14 +152,12 @@ Cargo manifests:
 | `binary_readme` | a package with a binary target and no `README.md` in its package directory |
 | `library_subscriber` | a package without a binary target with a configured subscriber crate as a regular dependency, renamed or not; dev and build dependencies may use one |
 
-- `binary_readme`: the package directory is where cargo finds its `Cargo.toml`, also when
-  that is a symlink.
-- `binary_readme`: a `README.md` symlink that leads nowhere counts as no README.
+- `binary_readme`: `README.md` follows the same nothing-there rule as module files; a
+  `README.md` directory is an error.
 - `binary_readme`: the finding names the path the README belongs at.
 
 `README.md` in each package's directory, and at the root of a workspace with no root
-package: `em_dash`, `emoji`, `forbidden_word`. A README two packages share, through a
-symlink say, is reported once.
+package: `em_dash`, `emoji`, `forbidden_word`.
 
 Always on:
 
@@ -139,15 +165,21 @@ Always on:
 - `malformed_exemption` and `unfulfilled_exemption`: see Exemptions.
 
 Limits: no type information. Macro bodies are token trees: only the comment rules look inside
-them.
+them. Nesting is tested to 5000 levels of parentheses and inline modules, and to 20000 inline
+modules in a file with a syntax error; deeper or other nesting may abort with a stack overflow.
+A file whose syntax tree is more than 1000 levels deep keeps that tree in memory until
+samlinter exits. The parser's time grows quadratically with nested parentheses: 8000 levels
+take about 5 s in a debug build.
 
 ## Configuration
 
-`samlinter.toml` sits at the workspace root. Every key is required; unknown keys are an error.
+`samlinter.toml` sits at the workspace root. Every key but `exclude` is required; unknown keys
+are an error.
 
 ```toml
 forbidden-words = ["NOTES.md", "it is worth noting"]
 subscriber-crates = ["tracing-subscriber"]
+exclude = ["src/generated", "build/bindings.rs"]
 ```
 
 - `forbidden-words`: banned in comments and README files, matched case-sensitively as whole words.
@@ -156,12 +188,26 @@ subscriber-crates = ["tracing-subscriber"]
   text with their markers dropped, so a phrase wrapped onto the next comment line matches; a
   blank line or code between them ends the run. A finding points at the phrase's first
   character.
-- Entries in both lists must be non-empty, with no surrounding whitespace.
+- Entries in every list must be non-empty, with no surrounding whitespace.
 - `subscriber-crates`: crates that install a log subscriber; a package without a binary target
   may list them only as dev or build dependencies. As on crates.io, `-` and `_` in a name
   match each other.
+- `exclude`: optional, default empty. Files and directories every rule is silenced for; it is
+  for generated code, never for silencing a finding in code people write.
+  - Each entry is a path relative to the workspace root, written with `/`, naming a file or
+    a directory; a directory covers everything below it, `.` the whole root. No globs.
+  - An entry that is absolute, climbs above the root with `..`, names nothing, or passes
+    through a symlink is an error (exit 2) naming the entry, so a stale entry cannot
+    silently hide nothing or the wrong thing.
+  - A covered file gets no finding from any rule, whatever kind of file it is.
+  - A module lookup stops at the first path an entry covers: a covered Rust file is never
+    read, its `mod` declarations are not followed, and a symlink, a directory that may not
+    be searched or an unreadable file below a covered path never stops the run.
+  - A covered `Cargo.toml`, `README.md` or `samlinter.toml` is still read; only its
+    findings are dropped.
+  - Files outside the workspace root are never covered.
 
-The file holds facts, not policy: nothing in it disables a rule or excludes a path.
+Nothing in the file disables a rule.
 
 ## Exemptions
 

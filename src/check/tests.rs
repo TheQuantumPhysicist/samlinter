@@ -1,13 +1,7 @@
-// - TODO: randomized variant: random findings across random members, sources and READMEs in
-//   random input order come out of `run` sorted by path, position and rule.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
 use super::{PROFILES, run, text_file};
 use crate::config::{Config, words};
 use crate::workspace::{
-    Dependency, Package, PackageKind, Readme, Root, Section, TextFile, Workspace,
+    Dependency, Excluded, Package, PackageKind, Readme, Root, Section, TextFile, Workspace,
 };
 use ra_ap_syntax::Edition;
 use rstest::rstest;
@@ -22,7 +16,7 @@ fn missing(expected: &str) -> Readme {
     }
 }
 
-/// A config file; `run` takes the parsed config instead.
+/// A config file; `run` takes the parsed config from `Workspace.settings` instead.
 fn config_file() -> TextFile {
     text_file("samlinter.toml", "")
 }
@@ -49,6 +43,10 @@ fn package(dir: &str, kind: PackageKind, source: &str) -> Package {
 fn workspace(edition: Edition, source: &str) -> Workspace {
     Workspace {
         config: config_file(),
+        settings: config(),
+        excluded: Excluded::default(),
+        root_dir: PathBuf::from("/workspace"),
+        warnings: Vec::new(),
         root: Root::Virtual {
             manifest: text_file("Cargo.toml", PROFILES),
             readme: missing("README.md"),
@@ -72,7 +70,7 @@ fn config() -> Config {
 }
 
 fn lines(workspace: &Workspace) -> Vec<String> {
-    run(workspace, &config())
+    run(workspace)
         .unwrap()
         .iter()
         .map(ToString::to_string)
@@ -165,33 +163,6 @@ fn config_comments_are_checked_for_prose() {
 }
 
 #[test]
-fn readme_shared_by_root_and_member_is_reported_once() {
-    // A member README symlinked to the root one: both read as the same file.
-    let readme = || Readme::Found(text_file("README.md", "a \u{2014}\n"));
-    let workspace = workspace(Edition::Edition2024, "");
-    let members = workspace
-        .members
-        .into_iter()
-        .map(|member| Package {
-            readme: readme(),
-            ..member
-        })
-        .collect();
-    let workspace = Workspace {
-        root: Root::Virtual {
-            manifest: text_file("Cargo.toml", PROFILES),
-            readme: readme(),
-        },
-        members,
-        ..workspace
-    };
-    assert_eq!(
-        lines(&workspace),
-        ["README.md:1:3: em_dash: em-dash (U+2014)"]
-    );
-}
-
-#[test]
 fn leading_bom_takes_no_column_in_readme_and_manifest() {
     let workspace = workspace(Edition::Edition2024, "");
     let members = workspace
@@ -234,13 +205,13 @@ fn root_package(source: &str) -> Package {
 fn root_package_gets_root_rules_and_its_files_checked() {
     let root = root_package("fn main() {}\n\nfn f(v: V) {\n    let V { a, .. } = v;\n}\n");
     let workspace = Workspace {
-        config: config_file(),
         root: Root::Package(root),
         members: vec![package(
             "member/",
             PackageKind::Library,
             "pub(crate) fn g() {}\n",
         )],
+        ..workspace(Edition::Edition2024, "")
     };
     assert_eq!(
         lines(&workspace),
@@ -270,12 +241,12 @@ fn file_outside_the_root_shows_its_absolute_path() {
 #[test]
 fn root_package_readme_is_checked_for_prose() {
     let workspace = Workspace {
-        config: config_file(),
         root: Root::Package(Package {
             readme: Readme::Found(text_file("README.md", PROSE)),
             ..root_package("fn main() {}\n")
         }),
         members: Vec::new(),
+        ..workspace(Edition::Edition2024, "")
     };
     assert_eq!(
         lines(&workspace),
@@ -300,14 +271,14 @@ fn dependency_missing_from_its_manifest_stops_the_run() {
     };
     let workspace = Workspace {
         members: vec![member],
+        settings: Config {
+            subscriber_crates: words(&["tracing-subscriber"]),
+            ..config()
+        },
         ..workspace(Edition::Edition2024, "")
     };
-    let config = Config {
-        subscriber_crates: words(&["tracing-subscriber"]),
-        ..config()
-    };
     assert_eq!(
-        run(&workspace, &config).unwrap_err().to_string(),
+        run(&workspace).unwrap_err().to_string(),
         "member/Cargo.toml: `cargo metadata` lists dependency `logs`, but samlinter finds no entry for it in this file; please report this samlinter bug"
     );
 }

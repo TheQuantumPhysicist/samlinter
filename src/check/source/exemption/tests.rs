@@ -1,9 +1,3 @@
-// - TODO: randomized variant: random rule order and an optional trailing comma in
-//   `expect(..)` give one unfulfilled finding per listed rule with no hit.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
 use super::super::{hits, patterns, render};
 use super::apply;
 use ra_ap_syntax::AstNode;

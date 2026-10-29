@@ -1,4 +1,5 @@
 use crate::finding::Position;
+use anyhow::Result;
 use ra_ap_syntax::ast::{self, HasAttrs, HasModuleItem, HasName};
 use ra_ap_syntax::{AstNode, Edition, TextSize};
 use std::borrow::Cow;
@@ -18,6 +19,17 @@ pub enum FileKind {
 pub struct Candidate {
     pub path: PathBuf,
     pub kind: FileKind,
+}
+
+/// What the lookup `candidates` is given finds at an inline module's written directory.
+pub enum Directory {
+    /// An existing directory, by its normalized path.
+    At(PathBuf),
+    /// - The lookup gives no answer there, so the directory is entered as written.
+    /// - Each candidate file below it then gets that same answer when looked up.
+    AsWritten,
+    /// No directory there.
+    Absent,
 }
 
 /// One out-of-line `mod name;` item.
@@ -57,6 +69,7 @@ enum Paths {
 }
 
 /// One place a module may be.
+#[derive(Clone, Copy)]
 enum Location<'a> {
     /// Named after the module.
     Default,
@@ -80,6 +93,22 @@ impl Body {
             .map(Self::Inline)
             .or_else(|| module.semicolon_token().map(|_| Self::OutOfLine))
     }
+
+    /// The inner `#![..]` attributes; only an inline module's item list holds them.
+    fn inner_attrs(&self) -> Vec<ast::Attr> {
+        match self {
+            Self::OutOfLine => Vec::new(),
+            Self::Inline(list) => list.attrs().collect(),
+        }
+    }
+}
+
+/// - The inline module a walk is inside, linked to the ones around it.
+/// - Borrowed from the stack frames of the walk, so memory grows linearly with nesting depth.
+struct Enclosing<'a> {
+    module: Module,
+    /// `None` at the outermost inline module.
+    outer: Option<&'a Enclosing<'a>>,
 }
 
 /// A `path` attribute whose value is not a valid string literal.
@@ -90,13 +119,18 @@ pub struct BadPath {
 }
 
 impl Paths {
-    /// Every location some cfg setting gives the module.
-    fn locations(&self) -> impl Iterator<Item = Location<'_>> {
-        let (first, conditional) = match self {
+    /// The location with no cfg set, then the `cfg_attr` path values.
+    fn split(&self) -> (Location<'_>, &[String]) {
+        match self {
             Self::Open { conditional } => (Location::Default, conditional),
             Self::Fixed { fixed, conditional } => (Location::Path(fixed), conditional),
-        };
-        iter::once(first).chain(conditional.iter().map(|path| Location::Path(path)))
+        }
+    }
+
+    /// Every location some cfg setting gives the module.
+    fn locations(&self) -> impl Iterator<Item = Location<'_>> {
+        let (unconditional, conditional) = self.split();
+        iter::once(unconditional).chain(conditional.iter().map(|path| Location::Path(path)))
     }
 
     /// Every path value in attribute order.
@@ -146,14 +180,14 @@ fn open_then(conditional: Vec<String>, meta: &ast::Meta, line: usize) -> Result<
 /// - Every out-of-line `mod` declaration in module item lists, inline modules included.
 /// - Modules inside function bodies and macro bodies are not seen.
 pub fn declarations(text: &str, edition: Edition) -> Result<Vec<Declaration>, BadPath> {
-    let tree = ast::SourceFile::parse(text, edition).tree();
-    in_items(text, tree.items(), &[])
+    let (tree, _) = crate::syntax::parse(text, edition);
+    in_items(text, tree.items(), None)
 }
 
 fn in_items(
     text: &str,
     items: impl Iterator<Item = ast::Item>,
-    inline: &[Module],
+    enclosing: Option<&Enclosing>,
 ) -> Result<Vec<Declaration>, BadPath> {
     let nested = items
         .filter_map(|item| match item {
@@ -175,7 +209,7 @@ fn in_items(
             | ast::Item::Union(_)
             | ast::Item::Use(_) => None,
         })
-        .map(|module| in_module(text, &module, inline))
+        .map(|module| in_module(text, &module, enclosing))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(nested.into_iter().flatten().collect())
 }
@@ -183,21 +217,31 @@ fn in_items(
 fn in_module(
     text: &str,
     module: &ast::Module,
-    inline: &[Module],
+    enclosing: Option<&Enclosing>,
 ) -> Result<Vec<Declaration>, BadPath> {
-    // A `mod` without a name, or with neither `;` nor an item list, is a syntax error, which
-    // the source check reports.
-    let (Some(name), Some(body)) = (module.name(), Body::of(module)) else {
-        return Ok(Vec::new());
-    };
+    match (module.name(), Body::of(module)) {
+        (Some(name), Some(body)) => in_named_module(text, module, &name, body, enclosing),
+        // A `mod` without a name, or with neither `;` nor an item list, is a syntax error, which
+        // the source check reports.
+        (None, None | Some(_)) | (Some(_), None) => Ok(Vec::new()),
+    }
+}
+
+/// `in_module` for a `mod` item with the name `name` and the contents `body`.
+fn in_named_module(
+    text: &str,
+    module: &ast::Module,
+    name: &ast::Name,
+    body: Body,
+    enclosing: Option<&Enclosing>,
+) -> Result<Vec<Declaration>, BadPath> {
     // - Invariant: the parser starts every module item at its `mod` keyword.
     // - A missing keyword is a parser bug, not bad input, so there is nothing to report.
     let keyword = module
         .mod_token()
         .expect("the parser builds every module item from its `mod` keyword");
     // rustc reads the outer attributes, then an inline module's inner `#![..]` ones.
-    let inner = module.item_list().into_iter().flat_map(|list| list.attrs());
-    let attributes = module.attrs().chain(inner).filter_map(|attr| {
+    let attributes = module.attrs().chain(body.inner_attrs()).filter_map(|attr| {
         let line = line(text, attr.syntax().text_range().start());
         attr.meta().map(|meta| (meta, line))
     });
@@ -209,11 +253,25 @@ fn in_module(
     match body {
         Body::OutOfLine => Ok(vec![Declaration {
             line: line(text, keyword.text_range().start()),
-            inline: inline.to_vec(),
+            inline: outermost_first(enclosing),
             module: this,
         }]),
-        Body::Inline(list) => in_items(text, list.items(), &[inline, &[this]].concat()),
+        Body::Inline(list) => in_items(
+            text,
+            list.items(),
+            Some(&Enclosing {
+                module: this,
+                outer: enclosing,
+            }),
+        ),
     }
+}
+
+fn outermost_first(enclosing: Option<&Enclosing>) -> Vec<Module> {
+    let innermost_first: Vec<&Module> = iter::successors(enclosing, |link| link.outer)
+        .map(|link| &link.module)
+        .collect();
+    innermost_first.into_iter().rev().cloned().collect()
 }
 
 fn line(text: &str, offset: TextSize) -> usize {
@@ -313,23 +371,50 @@ impl Base {
         }
     }
 
-    /// The bases inside the inline module `module`, one per location: its name below `default`,
-    /// or its `path` value below `path`.
-    fn enter(&self, module: &Module) -> Vec<Self> {
-        module
-            .paths
-            .locations()
-            .map(|location| {
-                let dir = match location {
-                    Location::Default => self.default.join(&module.name),
-                    Location::Path(path) => self.path.join(path),
-                };
-                Self {
-                    default: dir.clone(),
-                    path: dir,
-                }
-            })
-            .collect()
+    /// - The directories of the inline module `module`: its location with no cfg set, then each
+    ///   `cfg_attr` location that `directory` finds.
+    /// - An existing one at the normalized path `directory` gives, a missing one as written.
+    fn enter(
+        &self,
+        module: &Module,
+        directory: &impl Fn(&Path) -> Result<Directory>,
+    ) -> Result<Vec<PathBuf>> {
+        let (unconditional, conditional) = module.paths.split();
+        // - Kept even when missing: rustc looks there with no cfg set.
+        // - So a missing-module error always names it.
+        let written = self.dir(module, unconditional);
+        let first = match directory(&written)? {
+            Directory::At(path) => path,
+            Directory::AsWritten | Directory::Absent => written,
+        };
+        // - A `cfg_attr` `path` directory that does not exist holds no file.
+        // - Entering it anyway doubles the bases at every nesting level.
+        let others = conditional.iter().filter_map(|path| {
+            let written = self.dir(module, Location::Path(path));
+            match directory(&written) {
+                Ok(Directory::At(path)) => Some(Ok(path)),
+                Ok(Directory::AsWritten) => Some(Ok(written)),
+                Ok(Directory::Absent) => None,
+                Err(error) => Some(Err(error)),
+            }
+        });
+        iter::once(Ok(first)).chain(others).collect()
+    }
+
+    /// The directory of the inline module `module` at `location`.
+    fn dir(&self, module: &Module, location: Location<'_>) -> PathBuf {
+        match location {
+            Location::Default => self.default.join(&module.name),
+            Location::Path(path) => self.path.join(path),
+        }
+    }
+
+    /// Inside an inline module both bases are its directory.
+    fn at(dir: PathBuf) -> Self {
+        Self {
+            default: dir.clone(),
+            path: dir,
+        }
     }
 
     /// The files the out-of-line module `module` may be; a file loaded through a `path` value
@@ -358,24 +443,47 @@ impl Base {
     }
 }
 
-/// The files `declaration`, found in the file `name` of `kind` in the directory `dir`, may be:
-/// every combination of the locations of the inline modules around it, then of its own.
+/// - The files `declaration`, found in the file `name` of `kind` in the directory `dir`, may be:
+///   every combination of the locations of the inline modules around it, then of its own.
+/// - `directory` tells what is at an inline module's written directory; it walks the written
+///   path, so it also meets any symlink on the way.
+/// - An inline module's `cfg_attr` location is entered only when it exists, and each
+///   directory once however it is spelled, so the work is bounded by the existing directories.
 pub fn candidates(
     dir: &Path,
     name: &OsStr,
     kind: FileKind,
     declaration: &Declaration,
-) -> Vec<Candidate> {
-    let bases = declaration
-        .inline
-        .iter()
-        .fold(vec![Base::of(dir, name, kind)], |bases, module| {
-            bases.iter().flat_map(|base| base.enter(module)).collect()
-        });
-    bases
+    directory: impl Fn(&Path) -> Result<Directory>,
+) -> Result<Vec<Candidate>> {
+    let bases = declaration.inline.iter().try_fold(
+        vec![Base::of(dir, name, kind)],
+        |bases, module| -> Result<Vec<Base>> {
+            let entered = bases
+                .iter()
+                .map(|base| base.enter(module, &directory))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(first_of_each(entered.into_iter().flatten().collect())
+                .into_iter()
+                .map(Base::at)
+                .collect())
+        },
+    )?;
+    Ok(bases
         .iter()
         .flat_map(|base| base.files(&declaration.module))
-        .collect()
+        .collect())
+}
+
+/// `dirs` in order, each once: `enter` gave every spelling of an existing one the same path.
+fn first_of_each(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
+    dirs.into_iter().fold(Vec::new(), |kept, dir| {
+        if kept.contains(&dir) {
+            kept
+        } else {
+            kept.into_iter().chain([dir]).collect()
+        }
+    })
 }
 
 #[cfg(test)]

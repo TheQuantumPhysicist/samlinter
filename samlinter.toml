@@ -1,6 +1,7 @@
 # - Workspace facts samlinter cannot derive from `cargo metadata`.
-# - Every key is required; unknown keys are an error, so a typo cannot silently skip a check.
-# - No rule switches, path excludes or severities: every finding fails the run.
+# - Every key but `exclude` is required; unknown keys are an error, so a typo cannot silently
+#   skip a check.
+# - No rule switches or severities: every finding fails the run.
 # - Exemptions live at the violation, never here:
 #   - Rust: #[cfg_attr(samlinter, expect(<rule>, reason = "<why>"))]
 #   - Cargo.toml: [package.metadata.samlinter.expect.<rule>] with <dependency> = "<why>"
@@ -16,3 +17,12 @@ forbidden-words = ["RULES.md", "CODEMAP.md", "HANDOFF.md", "TRACKS.md", "CLAUDE.
 #   dev or build dependencies.
 # - `-` and `_` in a name match each other, as on crates.io.
 subscriber-crates = ["tracing-subscriber"]
+
+# - Optional: files and directories every rule is silenced for. For generated code only,
+#   never to silence a finding in code people write.
+# - Paths relative to the workspace root, written with `/`; a directory covers everything
+#   below it. No globs.
+# - An entry that is absolute, climbs above the root, names nothing or passes through a
+#   symlink is an error.
+# - A covered Rust file is never read, and its `mod` declarations are not followed.
+# exclude = ["src/generated", "build/bindings.rs"]

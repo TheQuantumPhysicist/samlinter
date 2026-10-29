@@ -1,15 +1,27 @@
 use crate::finding::Rule;
 use std::fmt;
 
+/// - The bad fix every rule shares: `exclude` silences every rule for the files it covers.
+/// - Rendered after each rule's own bad fixes.
+const EXCLUDE_IS_FOR_GENERATED_CODE: &str = "Do not add the file to `exclude` in samlinter.toml to silence a finding; `exclude` is for generated code.";
+
 /// What a reader needs to fix a rule's findings properly.
 pub struct Guidance {
     pub why: &'static [&'static str],
     pub fix: &'static [&'static str],
-    /// Tempting edits that silence a finding but keep the problem.
+    /// Tempting edits that silence a finding but keep the problem, this rule's own.
     pub bad_fixes: &'static [&'static str],
 }
 
 impl Guidance {
+    /// This rule's own bad fixes, then the one every rule shares.
+    fn all_bad_fixes(&self) -> impl Iterator<Item = &'static str> {
+        self.bad_fixes
+            .iter()
+            .copied()
+            .chain([EXCLUDE_IS_FOR_GENERATED_CODE])
+    }
+
     /// Exhaustive on purpose: a new rule does not compile until it explains itself.
     pub const fn of(rule: Rule) -> Self {
         match rule {
@@ -36,10 +48,11 @@ impl Guidance {
 
 impl fmt::Display for Guidance {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let bad_fixes: Vec<&str> = self.all_bad_fixes().collect();
         [
             ("why", self.why),
             ("fix", self.fix),
-            ("bad fixes", self.bad_fixes),
+            ("bad fixes", bad_fixes.as_slice()),
         ]
         .iter()
         .try_for_each(|(label, points)| {

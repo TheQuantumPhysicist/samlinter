@@ -1,9 +1,3 @@
-// - TODO: randomized variant: a random module in the required order gives no hits; moving one
-//   random item above an earlier group gives exactly one `item_order`, at that item.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
 use super::super::{hits, render};
 use super::check;
 use rstest::rstest;
@@ -73,6 +67,8 @@ fn canonical_module_passes() {
 #[case::any_gate_is_regular("#[cfg(any(test, unix))]\nuse a;\nuse b;\n", &[])]
 #[case::not_gate_is_regular("#[cfg(not(test))]\nuse a;\nuse b;\n", &[])]
 #[case::all_with_not_test_is_regular("#[cfg(all(unix, not(test)))]\nuse a;\nuse b;\n", &[])]
+#[case::test_with_a_value_is_regular("#[cfg(test = \"x\")]\nuse a;\nuse b;\n", &[])]
+#[case::all_with_a_test_value_is_regular("#[cfg(all(test = \"x\"))]\nuse a;\nuse b;\n", &[])]
 #[case::cfg_attr_on_test_is_no_test_gate(
     "#[cfg(test)]\nuse a;\n\n#[cfg_attr(test, allow(unused))]\nuse b;\n",
     &["4:1 item_order"]

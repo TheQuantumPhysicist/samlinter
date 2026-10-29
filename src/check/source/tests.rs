@@ -1,9 +1,3 @@
-// - TODO: randomized variant: random text with CRLF line ends and an optional BOM gives the
-//   same findings as its LF form, positions included.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
 use super::super::text_file;
 use super::check;
 use crate::config::{Config, words};
@@ -29,15 +23,23 @@ fn findings(text: &str) -> Vec<String> {
 }
 
 #[rstest]
-#[case::rest_pattern_after_the_error("fn f( {\n}\nfn g(v: V) { let V { .. } = v; }\n")]
-#[case::comment_before_the_error("// see NOTES.md \u{2014}\nfn f( {\n")]
-fn file_with_syntax_errors_is_reported_not_linted(#[case] text: &str) {
-    let found = findings(text);
-    assert_ne!(found, Vec::<String>::new());
-    assert!(
-        found.iter().all(|line| line.contains(": syntax_error: ")),
-        "{found:?}"
-    );
+#[case::rest_pattern_after_the_error(
+    "fn f( {\n}\nfn g(v: V) { let V { .. } = v; }\n",
+    &[
+        "src/lib.rs:1:6: syntax_error: expected value parameter",
+        "src/lib.rs:1:6: syntax_error: expected R_PAREN",
+    ]
+)]
+#[case::comment_before_the_error(
+    "// see NOTES.md \u{2014}\nfn f( {\n",
+    &[
+        "src/lib.rs:2:6: syntax_error: expected value parameter",
+        "src/lib.rs:2:6: syntax_error: expected R_PAREN",
+        "src/lib.rs:2:8: syntax_error: expected R_CURLY",
+    ]
+)]
+fn file_with_syntax_errors_is_reported_not_linted(#[case] text: &str, #[case] expected: &[&str]) {
+    assert_eq!(findings(text), expected);
 }
 
 #[rstest]
@@ -150,6 +152,17 @@ fn parses_with_the_package_edition(#[case] edition: Edition, #[case] expected: &
     assert_eq!(
         findings_in(edition, "fn f() {\n    let gen = 1;\n}\n"),
         expected
+    );
+}
+
+#[test]
+fn each_syntax_error_is_one_finding() {
+    assert_eq!(
+        findings("fn f() {\n    let gen = 1;\n    let gen = 2;\n}\n"),
+        [
+            "src/lib.rs:2:9: syntax_error: expected pattern",
+            "src/lib.rs:3:9: syntax_error: expected pattern",
+        ]
     );
 }
 

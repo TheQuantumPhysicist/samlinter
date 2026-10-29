@@ -14,6 +14,10 @@ Needs cargo on PATH and samlinter.toml at the workspace root. Prints findings
 grouped by rule, one per line as path:line:column: rule: message; whole-file
 findings omit line:column.
 Paths are relative to the workspace root, absolute outside it.
+Every file (sources, manifests, READMEs, samlinter.toml) shows by its path, . and
+.. resolved; binary_readme names where the missing README belongs. Symlinks are
+not followed: a symlink samlinter reads or enters, other than the workspace root
+and its parents, stops the run (exit 2).
 Each group ends with why the rule exists, how to fix it, and which fixes only
 hide the problem. The finding count goes to stderr.
 Exit status: 0 clean, 1 findings, 2 error.

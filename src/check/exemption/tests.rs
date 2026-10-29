@@ -1,10 +1,3 @@
-// - TODO: randomized variant: random finding offsets and random nested exemption scopes: each
-//   finding inside some scope is dropped and credited to the narrowest, every scope credited
-//   with none comes back unfulfilled.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
 use super::apply_exemptions;
 use rstest::rstest;
 use std::ops::Range;

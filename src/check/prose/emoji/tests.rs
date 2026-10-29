@@ -1,12 +1,3 @@
-// - TODO: randomized variant: random ASCII filler with random emoji sequences (single,
-//   skin-toned, flags, joined, VS16-forced) inserted at random points: exactly one start
-//   per inserted sequence, at its first character: the text symbol when a VS16 forces
-//   one, the modifier base when a skin tone does; an emoji a VS15 turns to text gives
-//   none.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
 use super::{Glyph, Sequence, Start, Step, starts};
 use rstest::rstest;
 

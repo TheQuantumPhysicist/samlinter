@@ -1,11 +1,7 @@
-// - TODO: randomized variant: random lists of random single-line points render as
-//   `  <label>:` then `    - <point>` lines, in order.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
-use super::Guidance;
+use super::{EXCLUDE_IS_FOR_GENERATED_CODE, Guidance};
 use crate::finding::{Exemptability, Rule};
+use rstest::rstest;
+use std::collections::BTreeSet;
 use strum::IntoEnumIterator;
 
 const NONE: [&str; 0] = [];
@@ -15,8 +11,8 @@ fn points(guidance: &Guidance) -> impl Iterator<Item = &'static str> {
         .why
         .iter()
         .chain(guidance.fix)
-        .chain(guidance.bad_fixes)
         .copied()
+        .chain(guidance.all_bad_fixes())
 }
 
 #[test]
@@ -29,12 +25,110 @@ fn every_rule_explains_why_how_and_what_not_to_do() {
     }
 }
 
+#[rstest]
+#[case::binary_readme(
+    Rule::BinaryReadme,
+    "Someone who finds a binary needs to know what it is for and how to run it without reading its source."
+)]
+#[case::em_dash(
+    Rule::EmDash,
+    "Comments and documentation should read like an engineer's notes. An em-dash usually joins two thoughts that belong in separate sentences or points."
+)]
+#[case::emoji(
+    Rule::Emoji,
+    "Comments and documentation should read like an engineer's notes. Emoji carry no technical information and render differently across terminals and editors."
+)]
+#[case::feature_flags(
+    Rule::FeatureFlags,
+    "Every feature flag doubles the set of build configurations. Most combinations never get built or tested, so bugs hide in them."
+)]
+#[case::fn_spacing(
+    Rule::FnSpacing,
+    "A blank line between functions shows each one as a unit at a glance. rustfmt never adds it, so nothing else enforces it."
+)]
+#[case::forbidden_word(
+    Rule::ForbiddenWord,
+    "The project lists this word or phrase under `forbidden-words` in samlinter.toml because it must not appear in comments or README files."
+)]
+#[case::item_order(
+    Rule::ItemOrder,
+    "Every file follows one layout, so a reader finds its submodules, imports, code and tests in the same place everywhere."
+)]
+#[case::item_spacing(
+    Rule::ItemSpacing,
+    "Imports form one contiguous block, so rustfmt sorts them as one group and a reader sees every dependency in one place."
+)]
+#[case::library_subscriber(
+    Rule::LibrarySubscriber,
+    "Only the final program knows where logs go and at what level. A library that installs a subscriber fights the program's own setup, and a process can have only one global subscriber."
+)]
+#[case::malformed_exemption(
+    Rule::MalformedExemption,
+    "An exemption must name exactly which rule it lifts and why, so a reviewer can judge it. A malformed exemption exempts nothing."
+)]
+#[case::member_version(
+    Rule::MemberVersion,
+    "Each dependency has one version for the whole workspace, declared in the root manifest, so an upgrade happens in one place and crates never drift onto different versions."
+)]
+#[case::panic_strategy(
+    Rule::PanicStrategy,
+    "A panic means an invariant broke. With unwinding, only the panicking thread or task dies while the rest of the process keeps running on state that may be half-updated."
+)]
+#[case::rest_pattern(
+    Rule::RestPattern,
+    "`..` matches every field the pattern does not name, including fields added later."
+)]
+#[case::restricted_visibility(
+    Rule::RestrictedVisibility,
+    "`pub(crate)`, `pub(super)` and `pub(in path)` exist to let code outside an item's own module subtree reach into it."
+)]
+#[case::syntax_error(
+    Rule::SyntaxError,
+    "samlinter lints only files that parse completely, because findings on a half-parsed file would be wrong."
+)]
+#[case::unfulfilled_exemption(
+    Rule::UnfulfilledExemption,
+    "The exemption covers no finding anymore: the code it excused changed or moved, or an exemption nested inside it, or an earlier one for the same rule on the same node, already covers that finding. Left in place, it would silently excuse a future violation at that spot."
+)]
+#[case::workspace_dependency_form(
+    Rule::WorkspaceDependencyForm,
+    "Every workspace dependency uses one spelling, an inline table, so manifests stay uniform and the same line extends naturally when a crate needs extra features."
+)]
+fn each_rule_gets_its_own_guidance(#[case] rule: Rule, #[case] first_why: &str) {
+    assert_eq!(Guidance::of(rule).why.first(), Some(&first_why));
+}
+
+#[test]
+fn every_rule_has_its_own_why() {
+    let whys: BTreeSet<&[&str]> = Rule::iter().map(|rule| Guidance::of(rule).why).collect();
+    assert_eq!(whys.len(), Rule::iter().count());
+}
+
 #[test]
 fn bad_fixes_read_as_prohibitions() {
     for rule in Rule::iter() {
-        for point in Guidance::of(rule).bad_fixes {
+        for point in Guidance::of(rule).all_bad_fixes() {
             assert!(point.starts_with("Do not "), "{}: {point}", rule.name());
         }
+    }
+}
+
+/// `exclude` silences every rule, so every rule warns against using it for that.
+#[test]
+fn every_rule_ends_its_bad_fixes_with_the_exclude_warning() {
+    for rule in Rule::iter() {
+        let guidance = Guidance::of(rule);
+        let own = guidance
+            .bad_fixes
+            .iter()
+            .fold(String::new(), |text, point| text + "    - " + point + "\n");
+        assert!(
+            guidance.to_string().ends_with(&format!(
+                "  bad fixes:\n{own}    - {EXCLUDE_IS_FOR_GENERATED_CODE}\n"
+            )),
+            "{}",
+            rule.name()
+        );
     }
 }
 
@@ -88,6 +182,8 @@ fn renders_labeled_bullet_sections() {
     };
     assert_eq!(
         guidance.to_string(),
-        "  why:\n    - a\n  fix:\n    - b\n    - c\n  bad fixes:\n    - Do not d\n"
+        format!(
+            "  why:\n    - a\n  fix:\n    - b\n    - c\n  bad fixes:\n    - Do not d\n    - {EXCLUDE_IS_FOR_GENERATED_CODE}\n"
+        )
     );
 }

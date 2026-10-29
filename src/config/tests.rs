@@ -1,18 +1,13 @@
-// - TODO: randomized variant: 0..8 random trimmed words per key round-trip through TOML and
-//   `Config::parse`; one entry padded with whitespace is rejected.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
-use super::{Config, Word, words};
+use super::{ExcludeEntry, Settings, Word, words};
 use rstest::rstest;
 
 #[test]
 fn parses_every_required_key() {
-    let config = Config::parse(
+    let config = Settings::parse(
         "forbidden-words = [\"NOTES.md\", \"it is worth noting\"]\nsubscriber-crates = [\"tracing-subscriber\"]\n",
     )
-    .unwrap();
+    .unwrap()
+    .config;
     assert_eq!(
         config.forbidden_words,
         words(&["NOTES.md", "it is worth noting"])
@@ -22,9 +17,47 @@ fn parses_every_required_key() {
 
 #[test]
 fn accepts_empty_lists() {
-    let config = Config::parse("forbidden-words = []\nsubscriber-crates = []\n").unwrap();
-    assert_eq!(config.forbidden_words, Vec::new());
-    assert_eq!(config.subscriber_crates, Vec::new());
+    let settings = Settings::parse("forbidden-words = []\nsubscriber-crates = []\n").unwrap();
+    assert_eq!(settings.config.forbidden_words, Vec::new());
+    assert_eq!(settings.config.subscriber_crates, Vec::new());
+    assert_eq!(settings.exclude, Vec::new());
+}
+
+#[test]
+fn parses_exclude() {
+    let settings = Settings::parse(
+        "forbidden-words = []\nsubscriber-crates = []\nexclude = [\"src/generated\", \"build.rs\"]\n",
+    )
+    .unwrap();
+    let entries: Vec<&str> = settings.exclude.iter().map(ExcludeEntry::as_str).collect();
+    assert_eq!(entries, ["src/generated", "build.rs"]);
+}
+
+/// An entry is a relative path that stays at or below the root, checked when the file parses.
+#[rstest]
+#[case::relative("src/generated", Ok("src/generated"))]
+#[case::dot_dot_staying_below("src/../build.rs", Ok("src/../build.rs"))]
+#[case::the_root(".", Ok("."))]
+#[case::empty("", Err(BAD_ENTRY))]
+#[case::padded(" src", Err(BAD_ENTRY))]
+#[case::absolute(
+    "/src",
+    Err("`exclude` entry `/src` is absolute; write it relative to the workspace root")
+)]
+#[case::above_the_root("..", Err("`exclude` entry `..` climbs above the workspace root"))]
+#[case::out_and_back(
+    "src/../../ws/src",
+    Err("`exclude` entry `src/../../ws/src` climbs above the workspace root")
+)]
+fn exclude_entries_stay_below_the_root(#[case] entry: &str, #[case] expected: Result<&str, &str>) {
+    let parsed = ExcludeEntry::try_from(entry.to_owned());
+    assert_eq!(
+        parsed
+            .as_ref()
+            .map(ExcludeEntry::as_str)
+            .map_err(String::as_str),
+        expected
+    );
 }
 
 #[rstest]
@@ -49,18 +82,26 @@ const BAD_ENTRY: &str = "entries must be non-empty, without surrounding whitespa
 #[rstest]
 #[case::unknown_key(
     "forbidden-words = []\nsubscriber-crates = []\nseverity = \"warn\"\n",
-    "unknown field `severity`"
+    "TOML parse error at line 3, column 1\n  |\n3 | severity = \"warn\"\n  | ^^^^^^^^\nunknown field `severity`, expected one of `forbidden-words`, `subscriber-crates`, `exclude`\n"
 )]
-#[case::missing_subscriber_crates("forbidden-words = []\n", "missing field `subscriber-crates`")]
-#[case::missing_forbidden_words("subscriber-crates = []\n", "missing field `forbidden-words`")]
+#[case::missing_subscriber_crates(
+    "forbidden-words = []\n",
+    "TOML parse error at line 1, column 1\n  |\n1 | forbidden-words = []\n  | ^\nmissing field `subscriber-crates`\n"
+)]
+#[case::missing_forbidden_words(
+    "subscriber-crates = []\n",
+    "TOML parse error at line 1, column 1\n  |\n1 | subscriber-crates = []\n  | ^\nmissing field `forbidden-words`\n"
+)]
 #[case::wrong_type(
     "forbidden-words = \"AI\"\nsubscriber-crates = []\n",
-    "invalid type: string \"AI\", expected a sequence"
+    "TOML parse error at line 1, column 19\n  |\n1 | forbidden-words = \"AI\"\n  |                   ^^^^\ninvalid type: string \"AI\", expected a sequence\n"
 )]
-#[case::not_toml("forbidden-words = [\n", "unclosed array")]
-fn rejects_invalid_config(#[case] text: &str, #[case] reason: &str) {
-    let error = Config::parse(text).unwrap_err().to_string();
-    assert!(error.contains(reason), "`{reason}` missing from: {error}");
+#[case::not_toml(
+    "forbidden-words = [\n",
+    "TOML parse error at line 1, column 20\n  |\n1 | forbidden-words = [\n  |                    ^\nunclosed array, expected `]`\n"
+)]
+fn rejects_invalid_config(#[case] text: &str, #[case] expected: &str) {
+    assert_eq!(Settings::parse(text).unwrap_err().to_string(), expected);
 }
 
 /// The error quotes the line of the key and states the problem.
@@ -77,10 +118,14 @@ fn rejects_invalid_config(#[case] text: &str, #[case] reason: &str) {
     "forbidden-words = []\nsubscriber-crates = [\"\"]\n",
     "TOML parse error at line 2, column 21\n  |\n2 | subscriber-crates = [\"\"]\n  |                     ^^^^\nentries must be non-empty, without surrounding whitespace\n"
 )]
+#[case::empty_exclude(
+    "forbidden-words = []\nsubscriber-crates = []\nexclude = [\"\"]\n",
+    "TOML parse error at line 3, column 11\n  |\n3 | exclude = [\"\"]\n  |           ^^^^\nentries must be non-empty, without surrounding whitespace\n"
+)]
 #[case::padded_subscriber(
     "forbidden-words = []\nsubscriber-crates = [\"tracing-subscriber \"]\n",
     "TOML parse error at line 2, column 21\n  |\n2 | subscriber-crates = [\"tracing-subscriber \"]\n  |                     ^^^^^^^^^^^^^^^^^^^^^^^\nentries must be non-empty, without surrounding whitespace\n"
 )]
 fn rejects_empty_or_padded_entries(#[case] text: &str, #[case] expected: &str) {
-    assert_eq!(Config::parse(text).unwrap_err().to_string(), expected);
+    assert_eq!(Settings::parse(text).unwrap_err().to_string(), expected);
 }

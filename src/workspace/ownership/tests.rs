@@ -1,11 +1,4 @@
-// - TODO: randomized variant: random nested package directories reaching random files:
-//   `owner` gives each file to the deepest package directory holding it, else to the lowest
-//   manifest path, whichever reaching package asks; `owned_sources` keeps every reached file
-//   in exactly one package.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
+use super::super::lookup::Looked;
 use super::super::{ByManifest, PackageKind, PackageMetadata, Reached, TextFile};
 use super::{Reach, claim, owned_sources, owner};
 use ra_ap_syntax::Edition;
@@ -13,24 +6,19 @@ use rstest::rstest;
 use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 
-/// The package with `manifest` in directory `dir`, reaching `files`.
-fn reach(manifest: &str, dir: &str, files: &[&str]) -> Reach {
+/// The package with `manifest`, reaching `files`.
+fn reach(manifest: &str, files: &[&str]) -> Reach {
     Reach {
         manifest: PathBuf::from(manifest),
-        dir: PathBuf::from(dir),
         files: files.iter().map(PathBuf::from).collect(),
     }
 }
 
-/// Each package by its manifest path, in the manifest's directory, with the one file it
-/// reaches.
+/// Each package by its manifest path, with the one file it reaches.
 fn reaches(packages: &[(&str, &str)]) -> Vec<Reach> {
     packages
         .iter()
-        .map(|(manifest, file)| {
-            let dir = Path::new(manifest).parent().unwrap().to_str().unwrap();
-            reach(manifest, dir, &[file])
-        })
+        .map(|(manifest, file)| reach(manifest, &[file]))
         .collect()
 }
 
@@ -95,31 +83,18 @@ fn the_strongest_reaching_package_owns_a_file(
 }
 
 #[rstest]
-#[case::package_holding_the_file("/ws/m/src/x.rs", "/ws/m/Cargo.toml", "/ws/m", Some(3))]
-#[case::outer_package_holding_the_file("/ws/m/src/x.rs", "/ws/Cargo.toml", "/ws", Some(2))]
-#[case::file_outside_the_package("/ws/a/src/x.rs", "/ws/b/Cargo.toml", "/ws/b", None)]
-#[case::root_package_and_a_file_outside_the_root("/shared/x.rs", "/ws/Cargo.toml", "/ws", None)]
-#[case::directory_sharing_a_name_prefix("/ws2/x.rs", "/ws/Cargo.toml", "/ws", None)]
-#[case::directory_holding_the_link_to_the_manifest(
-    "/ws/src/x.rs",
-    "/ws/real/Cargo.toml",
-    "/ws",
-    Some(2)
-)]
-#[case::directory_of_the_linked_manifest_is_no_claim(
-    "/elsewhere/src/x.rs",
-    "/elsewhere/Cargo.toml",
-    "/ws/m",
-    None
-)]
+#[case::package_holding_the_file("/ws/m/src/x.rs", "/ws/m/Cargo.toml", Some(3))]
+#[case::outer_package_holding_the_file("/ws/m/src/x.rs", "/ws/Cargo.toml", Some(2))]
+#[case::file_outside_the_package("/ws/a/src/x.rs", "/ws/b/Cargo.toml", None)]
+#[case::root_package_and_a_file_outside_the_root("/shared/x.rs", "/ws/Cargo.toml", None)]
+#[case::directory_sharing_a_name_prefix("/ws2/x.rs", "/ws/Cargo.toml", None)]
 fn a_claim_is_the_holding_directory_depth_then_the_lower_manifest(
     #[case] file: &str,
     #[case] manifest: &str,
-    #[case] dir: &str,
     #[case] depth: Option<usize>,
 ) {
     assert_eq!(
-        claim(Path::new(file), &reach(manifest, dir, &[file])),
+        claim(Path::new(file), &reach(manifest, &[file])),
         (depth, Reverse(Path::new(manifest)))
     );
 }
@@ -142,10 +117,9 @@ fn each_package_keeps_only_the_files_it_owns() {
                 text: String::new(),
             })
             .collect();
-        let dir = Path::new(manifest).parent().unwrap().to_path_buf();
         let package = Reached {
             metadata,
-            dir,
+            manifest: Looked::Neither,
             sources,
         };
         (PathBuf::from(manifest), package)

@@ -1,10 +1,3 @@
-// - TODO: randomized variant: random `[a-z ]` filler with an em-dash, an emoji and a
-//   forbidden phrase inserted at random word boundaries, the phrase's spaces replaced by
-//   random whitespace runs: hits exactly at those offsets.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
 use super::{Piece, check, forbidden};
 use crate::config::words;
 use rstest::rstest;

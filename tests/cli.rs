@@ -1,8 +1,14 @@
+#[path = "../src/workspace/tests/on_drop.rs"]
+mod on_drop;
+
+use on_drop::OnDrop;
 use std::collections::BTreeSet;
+use std::env;
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{self, Command, Output, Stdio};
 
 /// Finding lines in report order: grouped by rule in rule order, then by path and position.
 const VIOLATIONS: &[&str] = &[
@@ -28,11 +34,10 @@ const VIOLATIONS: &[&str] = &[
     "app/Cargo.toml:7:1: workspace_dependency_form: write `strum = { workspace = true, ... }` as one inline table",
 ];
 
-/// - Every file the module tree reaches, printed by its canonical path: `tests/again.rs`
-///   reaches `src/from_tests.rs` through `../`, and the symlink `src/linked.rs` reaches
-///   `src/elsewhere/q.rs`, which is linted once.
-/// - Files outside the tree (build output, a hidden directory, an orphan `src/orphan.rs`)
-///   hold the same violation and stay silent.
+/// - Every file the module tree reaches, printed by its normalized path: `tests/again.rs`
+///   reaches `src/from_tests.rs` and `src/elsewhere/q.rs` through `../`.
+/// - Files outside the tree (build output, a hidden directory, an orphan `src/orphan.rs`) hold
+///   the same violation and stay silent.
 const MODULE_TREE: &[&str] = &[
     "src/a/b.rs:1:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy",
     "src/a.rs:3:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy",
@@ -55,6 +60,14 @@ const ROOT_PACKAGE: &[&str] = &[
     "src/main.rs:4:16: rest_pattern: `..` absorbs every field this pattern does not name",
     "member/src/lib.rs:1:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy",
 ];
+
+/// Nesting levels in `deep_workspace`, past the main thread's stack limit, near 3000.
+const DEPTH: usize = 5000;
+
+/// - Nesting levels in `deep_broken_workspace`.
+/// - Past what the parser's own 2 MiB drop thread frees, between 10000 and 15000: a file with a
+///   syntax error is always handed to that thread unless samlinter keeps its tree.
+const BROKEN_DEPTH: usize = 20000;
 
 fn manifest(fixture: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -152,7 +165,8 @@ fn findings_are_grouped_by_rule_and_fail_the_run() {
     assert_findings(&samlinter("violations").unwrap(), VIOLATIONS);
 }
 
-/// `violations_link` is a symlink to `violations`: paths print relative to the canonical root.
+/// `violations_link` is a symlink to `violations`: the root is taken as given, so paths print
+/// relative to it.
 #[test]
 fn workspace_behind_a_symlinked_directory_prints_the_same_paths() {
     assert_findings(&samlinter("violations_link").unwrap(), VIOLATIONS);
@@ -196,6 +210,314 @@ fn sources_are_the_files_mod_declarations_reach() {
     assert_findings(&samlinter("modules").unwrap(), MODULE_TREE);
 }
 
+/// - Writes a one-package workspace named `name` holding `sources` in a directory of its own
+///   under the OS temp directory, one per process.
+/// - Returns its manifest and a guard that removes the directory when dropped.
+fn scratch_workspace(
+    name: &str,
+    sources: Vec<(&str, String)>,
+) -> io::Result<(PathBuf, OnDrop<impl FnMut()>)> {
+    let config = [
+        (
+            "Cargo.toml",
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+                 [workspace]\n\n[profile.dev]\npanic = \"abort\"\n\n[profile.release]\n\
+                 panic = \"abort\"\n"
+            ),
+        ),
+        (
+            "samlinter.toml",
+            "forbidden-words = []\nsubscriber-crates = []\n".to_owned(),
+        ),
+    ];
+    let files: Vec<(&str, String)> = config.into_iter().chain(sources).collect();
+
+    let root = env::temp_dir().join(format!("samlinter-{name}-{}", process::id()));
+    fs::create_dir_all(root.join("src"))?;
+    let manifest = root.join("Cargo.toml");
+    let cleanup = OnDrop(move || {
+        fs::remove_dir_all(&root)
+            .unwrap_or_else(|error| eprintln!("cannot remove {}: {error}", root.display()));
+    });
+    for (path, text) in files {
+        fs::write(manifest.with_file_name(path), text)?;
+    }
+    Ok((manifest, cleanup))
+}
+
+/// - A workspace whose sources nest `DEPTH` levels deep.
+/// - `src/lib.rs`: `DEPTH` parentheses around a `..` left of `=`.
+/// - `src/deep.rs`: `DEPTH` inline modules around a `pub(crate)` item.
+fn deep_workspace() -> io::Result<(PathBuf, OnDrop<impl FnMut()>)> {
+    scratch_workspace(
+        "deep",
+        vec![
+            (
+                "src/lib.rs",
+                format!(
+                    "mod deep;\n\npub fn f(t: ()) {{\n    {}..{} = t;\n}}\n",
+                    "(".repeat(DEPTH),
+                    ")".repeat(DEPTH)
+                ),
+            ),
+            (
+                "src/deep.rs",
+                format!(
+                    "{}pub(crate) struct S;\n{}",
+                    "mod m {\n".repeat(DEPTH),
+                    "}\n".repeat(DEPTH)
+                ),
+            ),
+        ],
+    )
+}
+
+/// A workspace whose `src/broken.rs` nests `BROKEN_DEPTH` inline modules around a `mod` with no
+/// `;`.
+fn deep_broken_workspace() -> io::Result<(PathBuf, OnDrop<impl FnMut()>)> {
+    scratch_workspace(
+        "deep_broken",
+        vec![
+            ("src/lib.rs", "mod broken;\n".to_owned()),
+            (
+                "src/broken.rs",
+                format!(
+                    "{}mod gone\n{}",
+                    "mod m {\n".repeat(BROKEN_DEPTH),
+                    "}\n".repeat(BROKEN_DEPTH)
+                ),
+            ),
+        ],
+    )
+}
+
+#[test]
+fn deeply_nested_sources_are_linted_not_a_crash() {
+    let (manifest, _cleanup) = deep_workspace().unwrap();
+    assert_findings(
+        &run(&[OsStr::new("--manifest-path"), manifest.as_os_str()]).unwrap(),
+        &[
+            &format!(
+                "src/lib.rs:4:{}: rest_pattern: `..` absorbs every field this pattern does not name",
+                DEPTH + 5
+            ),
+            &format!(
+                "src/deep.rs:{}:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy",
+                DEPTH + 1
+            ),
+        ],
+    );
+}
+
+#[test]
+fn deeply_nested_syntax_error_is_reported_not_a_crash() {
+    let (manifest, _cleanup) = deep_broken_workspace().unwrap();
+    assert_findings(
+        &run(&[OsStr::new("--manifest-path"), manifest.as_os_str()]).unwrap(),
+        &[&format!(
+            "src/broken.rs:{}:9: syntax_error: expected `;` or `{{`",
+            BROKEN_DEPTH + 1
+        )],
+    );
+}
+
+/// - A `mod gone;` inside `DEPTH` inline modules names the files it tried, `DEPTH` levels deep.
+/// - Each level looks up a longer directory, so this pins that the walk stays fast.
+#[test]
+fn deeply_nested_missing_module_is_an_error_not_a_crash() {
+    let (manifest, _cleanup) = scratch_workspace(
+        "deep_missing",
+        vec![
+            ("src/lib.rs", "mod deep;\n".to_owned()),
+            (
+                "src/deep.rs",
+                format!(
+                    "{}mod gone;\n{}",
+                    "mod m {\n".repeat(DEPTH),
+                    "}\n".repeat(DEPTH)
+                ),
+            ),
+        ],
+    )
+    .unwrap();
+    let output = run(&[OsStr::new("--manifest-path"), manifest.as_os_str()]).unwrap();
+    let dir = format!("src/deep/{}", "m/".repeat(DEPTH));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "samlinter: src/deep.rs:{}: no file for `mod gone;`, tried {dir}gone.rs, {dir}gone/mod.rs\n",
+            DEPTH + 1
+        )
+    );
+    assert_eq!(output.status.code(), Some(2));
+}
+
+/// A name too long for the file system names no file, as for rustc.
+#[test]
+fn path_attribute_too_long_for_a_file_name_is_a_missing_module() {
+    let name = format!("{}.rs", "a".repeat(300));
+    let (manifest, _cleanup) = scratch_workspace(
+        "long_path",
+        vec![("src/lib.rs", format!("#[path = \"{name}\"]\nmod x;\n"))],
+    )
+    .unwrap();
+    let output = run(&[OsStr::new("--manifest-path"), manifest.as_os_str()]).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!("samlinter: src/lib.rs:2: no file for `mod x;`, tried src/{name}\n")
+    );
+    assert_eq!(output.status.code(), Some(2));
+}
+
+/// - Writes a workspace whose `src/lib.rs` holds `lib`, with `src/real.rs` and `src/real/mod.rs`
+///   present, then links `link` to `target` (both relative to the workspace).
+/// - Returns the run's output.
+#[cfg(unix)]
+fn run_with_link(name: &str, lib: &str, link: &str, target: &str) -> io::Result<Output> {
+    let (manifest, _cleanup) = scratch_workspace(
+        name,
+        vec![
+            ("src/lib.rs", lib.to_owned()),
+            ("src/real.rs", String::new()),
+        ],
+    )?;
+    fs::create_dir(manifest.with_file_name("src/real"))?;
+    fs::write(manifest.with_file_name("src/real/mod.rs"), "")?;
+    std::os::unix::fs::symlink(
+        manifest.with_file_name(target),
+        manifest.with_file_name(link),
+    )?;
+    run(&[OsStr::new("--manifest-path"), manifest.as_os_str()])
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_module_file_stops_the_run() {
+    let output = run_with_link("linked_file", "mod a;\n", "src/a.rs", "src/real.rs").unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "samlinter: src/a.rs: samlinter does not follow symlinks\n"
+    );
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_module_directory_stops_the_run() {
+    let output = run_with_link("linked_dir", "mod m;\n", "src/m", "src/real").unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "samlinter: src/m: samlinter does not follow symlinks\n"
+    );
+    assert_eq!(output.status.code(), Some(2));
+}
+
+/// - Writes a workspace named `name` whose `src/lib.rs` holds `lib`, links a scratch path to its
+///   directory and runs the command `configure` sets up on the manifest through that link.
+/// - Cargo then names the link as the workspace root.
+#[cfg(unix)]
+fn run_through_a_linked_root(
+    name: &str,
+    lib: &str,
+    configure: impl FnOnce(&mut Command),
+) -> io::Result<Output> {
+    let (manifest, _cleanup) = scratch_workspace(name, vec![("src/lib.rs", lib.to_owned())])?;
+    let link = env::temp_dir().join(format!("samlinter-{name}-link-{}", process::id()));
+    let root = manifest
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+    std::os::unix::fs::symlink(root, &link)?;
+    let _unlink = OnDrop(|| {
+        fs::remove_file(&link)
+            .unwrap_or_else(|error| eprintln!("cannot remove {}: {error}", link.display()));
+    });
+    let mut command = command(&[
+        OsStr::new("--manifest-path"),
+        link.join("Cargo.toml").as_os_str(),
+    ]);
+    configure(&mut command);
+    command.output()
+}
+
+/// The warning `src/lib.rs:2` gets in `run_through_a_linked_root`.
+const LINKED_ROOT_WARNING: &str = "samlinter: warning: src/lib.rs:2: `#[path]` climbs above the symlinked workspace root; module not followed\n";
+
+/// - `../../x.rs` leaves the linked root, so where it leads is unknown without following it.
+/// - A warning names the declaration; the exit status stays that of a clean run.
+#[cfg(unix)]
+#[test]
+fn path_climbing_out_of_a_symlinked_root_warns_and_is_not_followed() {
+    let output =
+        run_through_a_linked_root("linked_root", "#[path = \"../../x.rs\"]\nmod x;\n", |_| ())
+            .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stderr), LINKED_ROOT_WARNING);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(output.status.code(), Some(0));
+}
+
+/// Warnings come before the findings and leave their exit status alone.
+#[cfg(unix)]
+#[test]
+fn warning_beside_a_finding_keeps_the_findings_exit_status() {
+    let output = run_through_a_linked_root(
+        "linked_root_finding",
+        "#[path = \"../../x.rs\"]\nmod x;\n\npub(crate) fn f() {}\n",
+        |_| (),
+    )
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        finding_lines(&stdout),
+        ["src/lib.rs:4:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy"]
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!("{LINKED_ROOT_WARNING}samlinter: 1 finding(s)\n")
+    );
+    assert_eq!(output.status.code(), Some(1));
+}
+
+/// A warning that cannot be written is an error, even on a run with no findings.
+#[cfg(unix)]
+#[test]
+fn unwritable_stderr_with_only_a_warning_is_an_error() {
+    let (reader, writer) = io::pipe().unwrap();
+    drop(reader);
+    let output = run_through_a_linked_root(
+        "linked_root_closed",
+        "#[path = \"../../x.rs\"]\nmod x;\n",
+        |command| {
+            command.stdout(Stdio::piped()).stderr(writer);
+        },
+    )
+    .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+}
+
+/// An excluded file is not read: its syntax error, its finding and its missing module do not
+/// count.
+#[test]
+fn excluded_files_are_not_linted() {
+    let (manifest, _cleanup) = scratch_workspace(
+        "excluded",
+        vec![
+            (
+                "samlinter.toml",
+                "forbidden-words = []\nsubscriber-crates = []\nexclude = [\"src/generated.rs\"]\n"
+                    .to_owned(),
+            ),
+            ("src/lib.rs", "mod generated;\n".to_owned()),
+            (
+                "src/generated.rs",
+                "mod gone;\npub(crate) fn f( {}\n".to_owned(),
+            ),
+        ],
+    )
+    .unwrap();
+    assert_clean(&run(&[OsStr::new("--manifest-path"), manifest.as_os_str()]).unwrap());
+}
+
 #[test]
 fn root_package_is_linted_with_its_members() {
     assert_findings(&samlinter("root_package").unwrap(), ROOT_PACKAGE);
@@ -218,19 +540,18 @@ fn declared_module_without_a_file_is_an_error() {
 fn missing_config_is_an_error() {
     assert_error(
         &samlinter("unconfigured").unwrap(),
-        &[
-            "unconfigured/samlinter.toml",
-            "every workspace needs one, see the README",
-        ],
+        &["cannot read samlinter.toml; every workspace needs one, see the README"],
     );
 }
 
 #[test]
 fn invalid_config_is_an_error() {
-    assert_error(
-        &samlinter("misconfigured").unwrap(),
-        &["invalid", "misconfigured/samlinter.toml", "severity"],
+    let output = samlinter("misconfigured").unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "samlinter: invalid samlinter.toml: TOML parse error at line 3, column 1\n  |\n3 | severity = \"warn\"\n  | ^^^^^^^^\nunknown field `severity`, expected one of `forbidden-words`, `subscriber-crates`, `exclude`\n\n"
     );
+    assert_eq!(output.status.code(), Some(2));
 }
 
 #[test]
@@ -314,5 +635,6 @@ fn version_prints_the_package_version_and_passes() {
         String::from_utf8(output.stdout).unwrap(),
         format!("samlinter {}\n", env!("CARGO_PKG_VERSION"))
     );
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
     assert_eq!(output.status.code(), Some(0));
 }

@@ -1,9 +1,3 @@
-// - TODO: randomized variant: a random visibility on a random item kind gives a hit only for
-//   `pub(crate)`, `pub(super)` and `pub(in ..)`.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
 use super::super::{hits, render};
 use super::check;
 use ra_ap_syntax::AstNode;

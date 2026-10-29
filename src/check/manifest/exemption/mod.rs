@@ -64,63 +64,58 @@ fn samlinter_section<'a>(
     key: &'a Key,
     item: &'a Item,
 ) -> Vec<Result<Exemption<'a>, Violation<'a>>> {
-    let Some(section) = item.as_table_like() else {
-        return vec![Err(malformed(
+    match item.as_table_like() {
+        Some(section) => entries(section)
+            .into_iter()
+            .flat_map(|(key, value)| {
+                if key.get() == "expect" {
+                    expect_section(key, value)
+                } else {
+                    vec![Err(malformed(
+                        key,
+                        format!("unknown key `{}`; only `expect` is allowed", key.get()),
+                    ))]
+                }
+            })
+            .collect(),
+        None => vec![Err(malformed(
             key,
             "`[package.metadata.samlinter]` must be a table",
-        ))];
-    };
-    entries(section)
-        .into_iter()
-        .flat_map(|(key, value)| {
-            if key.get() == "expect" {
-                expect_section(key, value)
-            } else {
-                vec![Err(malformed(
-                    key,
-                    format!("unknown key `{}`; only `expect` is allowed", key.get()),
-                ))]
-            }
-        })
-        .collect()
+        ))],
+    }
 }
 
 fn expect_section<'a>(key: &'a Key, item: &'a Item) -> Vec<Result<Exemption<'a>, Violation<'a>>> {
-    let Some(rules) = item.as_table_like() else {
-        return vec![Err(malformed(key, "`expect` must be a table of rules"))];
-    };
-    entries(rules)
-        .into_iter()
-        .flat_map(|(key, dependencies)| rule_exemptions(key, dependencies))
-        .collect()
+    match item.as_table_like() {
+        Some(rules) => entries(rules)
+            .into_iter()
+            .flat_map(|(key, dependencies)| rule_exemptions(key, dependencies))
+            .collect(),
+        None => vec![Err(malformed(key, "`expect` must be a table of rules"))],
+    }
 }
 
 fn rule_exemptions<'a>(key: &'a Key, item: &'a Item) -> Vec<Result<Exemption<'a>, Violation<'a>>> {
-    let rule = match manifest_rule(key.get()) {
-        Ok(rule) => rule,
-        Err(message) => return vec![Err(malformed(key, message))],
-    };
-
-    let Some(dependencies) = item.as_table_like() else {
-        return vec![Err(malformed(
+    match (manifest_rule(key.get()), item.as_table_like()) {
+        (Err(message), Some(_) | None) => vec![Err(malformed(key, message))],
+        (Ok(_), None) => vec![Err(malformed(
             key,
             "map each exempt dependency to the reason it is exempt",
-        ))];
-    };
-
-    entries(dependencies)
-        .into_iter()
-        .map(|(dependency, reason)| match reason.as_str() {
-            Some(text) if !text.trim().is_empty() => Ok(Exemption {
-                rule,
-                key: dependency,
-            }),
-            Some(_) | None => Err(malformed(
-                dependency,
-                "the reason must be a non-empty string saying why",
-            )),
-        })
-        .collect()
+        ))],
+        (Ok(rule), Some(dependencies)) => entries(dependencies)
+            .into_iter()
+            .map(|(dependency, reason)| match reason.as_str() {
+                Some(text) if !text.trim().is_empty() => Ok(Exemption {
+                    rule,
+                    key: dependency,
+                }),
+                Some(_) | None => Err(malformed(
+                    dependency,
+                    "the reason must be a non-empty string saying why",
+                )),
+            })
+            .collect(),
+    }
 }
 
 fn manifest_rule(name: &str) -> Result<ManifestExemptable, String> {

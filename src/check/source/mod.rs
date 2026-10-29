@@ -40,10 +40,9 @@ fn rustc_input(text: &str) -> String {
 
 /// A file with any syntax error is reported, never linted half-parsed.
 fn parse(text: &str, edition: Edition) -> Result<ast::SourceFile, Vec<SyntaxError>> {
-    let parse = ast::SourceFile::parse(text, edition);
-    let errors = parse.errors();
+    let (tree, errors) = crate::syntax::parse(text, edition);
     if errors.is_empty() {
-        Ok(parse.tree())
+        Ok(tree)
     } else {
         Err(errors)
     }
@@ -134,7 +133,27 @@ fn is_bare_cfg_atom(predicate: &ast::CfgPredicate, name: &str) -> bool {
 
 /// The atom `<name>`, without a `= "value"`.
 fn is_bare_atom(atom: &ast::CfgAtom, name: &str) -> bool {
-    atom.eq_token().is_none() && atom.ident_token().is_some_and(|ident| ident.text() == name)
+    match Atom::of(atom) {
+        Atom::Bare(ident) => ident.text() == name,
+        Atom::Other => false,
+    }
+}
+
+/// The shape of a cfg atom that decides whether it names one bare cfg.
+enum Atom {
+    /// `name`, with no value.
+    Bare(ra_ap_syntax::SyntaxToken),
+    /// `name = "value"`, or an atom without a name, which rustc rejects.
+    Other,
+}
+
+impl Atom {
+    fn of(atom: &ast::CfgAtom) -> Self {
+        match (atom.ident_token(), atom.eq_token()) {
+            (Some(ident), None) => Self::Bare(ident),
+            (Some(_), Some(_)) | (None, None | Some(_)) => Self::Other,
+        }
+    }
 }
 
 /// Runs `rule` on edition-2024 `text`, which must parse.

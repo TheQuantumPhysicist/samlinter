@@ -1,9 +1,3 @@
-// - TODO: randomized variant: random findings render each line once, one `  why:` per
-//   distinct rule, groups in ascending rule order.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
 use super::guidance::Guidance;
 use super::render;
 use crate::finding::{Finding, Position, Rule, Span};

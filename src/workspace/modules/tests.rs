@@ -1,30 +1,37 @@
-// - TODO: randomized variant: random module names, inline nesting and `#[path]` values:
-//   `candidates` lists the files the module path rules give for mod-rs and non-mod-rs files.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
-use super::{BadPath, FileKind, candidates, declarations};
+use super::{BadPath, Directory, FileKind, candidates, declarations};
 use ra_ap_syntax::Edition;
 use rstest::rstest;
-use std::path::Path;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
-/// Each declaration in edition-2024 `text`, found in `file` of `kind`, as
-/// `line: candidate kind, ...`.
+/// - Each declaration in edition-2024 `text`, found in `file` of `kind`, as
+///   `line: candidate kind, ...`.
+/// - Every directory counts as existing, its normalized path its path as given.
 fn resolve(file: &str, kind: FileKind, text: &str) -> Vec<String> {
-    resolve_in(Edition::Edition2024, file, kind, text)
+    resolve_in(Edition::Edition2024, file, kind, text, |dir| {
+        Some(dir.to_path_buf())
+    })
 }
 
-/// `resolve` for `text` of `edition`.
-fn resolve_in(edition: Edition, file: &str, kind: FileKind, text: &str) -> Vec<String> {
+/// `resolve` for `text` of `edition`, with `existing` giving the normalized path of each
+/// directory that exists.
+fn resolve_in(
+    edition: Edition,
+    file: &str,
+    kind: FileKind,
+    text: &str,
+    existing: impl Fn(&Path) -> Option<PathBuf>,
+) -> Vec<String> {
     let file = Path::new(file);
+    let directory = |dir: &Path| Ok(existing(dir).map_or(Directory::Absent, Directory::At));
     declarations(text, edition)
         .unwrap()
         .iter()
         .map(|declaration| {
             let dir = file.parent().unwrap();
             let name = file.file_name().unwrap();
-            let files: Vec<String> = candidates(dir, name, kind, declaration)
+            let files: Vec<String> = candidates(dir, name, kind, declaration, directory)
+                .unwrap()
                 .iter()
                 .map(|candidate| format!("{} {:?}", candidate.path.display(), candidate.kind))
                 .collect();
@@ -81,6 +88,24 @@ fn resolve_in(edition: Edition, file: &str, kind: FileKind, text: &str) -> Vec<S
     FileKind::ModRs,
     "#[path = r\"x.rs\"]\nmod b;\n",
     &["2: src/x.rs ModRs"]
+)]
+#[case::module_after_an_inline_module(
+    "src/lib.rs",
+    FileKind::ModRs,
+    "mod m {\n    mod n;\n}\nmod a;\n",
+    &["2: src/m/n.rs NonModRs, src/m/n/mod.rs ModRs", "4: src/a.rs NonModRs, src/a/mod.rs ModRs"]
+)]
+#[case::sibling_inline_modules(
+    "src/lib.rs",
+    FileKind::ModRs,
+    "mod m {\n    mod a;\n}\nmod k {\n    mod b;\n}\n",
+    &["2: src/m/a.rs NonModRs, src/m/a/mod.rs ModRs", "5: src/k/b.rs NonModRs, src/k/b/mod.rs ModRs"]
+)]
+#[case::declaration_after_a_nested_inline_module(
+    "src/lib.rs",
+    FileKind::ModRs,
+    "mod m {\n    mod k {\n        mod a;\n    }\n    mod b;\n}\n",
+    &["3: src/m/k/a.rs NonModRs, src/m/k/a/mod.rs ModRs", "5: src/m/b.rs NonModRs, src/m/b/mod.rs ModRs"]
 )]
 #[case::inline_module_in_mod_rs_file(
     "src/lib.rs",
@@ -148,6 +173,12 @@ fn resolve_in(edition: Edition, file: &str, kind: FileKind, text: &str) -> Vec<S
     "#[cfg_attr(unix, path = \"u.rs\", path = \"v.rs\")]\nmod imp;\n",
     &["2: src/imp.rs NonModRs, src/imp/mod.rs ModRs, src/u.rs ModRs"]
 )]
+#[case::cfg_attr_path_naming_the_default_directory(
+    "src/lib.rs",
+    FileKind::ModRs,
+    "#[cfg_attr(unix, path = \"m\")]\nmod m {\n    mod n;\n}\n",
+    &["3: src/m/n.rs NonModRs, src/m/n/mod.rs ModRs"]
+)]
 #[case::cfg_attr_path_on_inline_module(
     "src/lib.rs",
     FileKind::ModRs,
@@ -205,6 +236,18 @@ fn resolve_in(edition: Edition, file: &str, kind: FileKind, text: &str) -> Vec<S
 #[case::empty_file("src/lib.rs", FileKind::ModRs, "", &[])]
 #[case::nameless_module("src/lib.rs", FileKind::ModRs, "mod;\n", &[])]
 #[case::module_missing_its_semicolon("src/lib.rs", FileKind::ModRs, "mod a\n", &[])]
+#[case::module_missing_its_semicolon_then_a_valid_one(
+    "src/lib.rs",
+    FileKind::ModRs,
+    "mod a\nmod b;\n",
+    &["2: src/b.rs NonModRs, src/b/mod.rs ModRs"]
+)]
+#[case::nameless_module_then_a_valid_one(
+    "src/lib.rs",
+    FileKind::ModRs,
+    "mod;\nmod b;\n",
+    &["2: src/b.rs NonModRs, src/b/mod.rs ModRs"]
+)]
 #[case::module_in_a_function_body(
     "src/lib.rs",
     FileKind::ModRs,
@@ -254,8 +297,146 @@ fn resolves_module_files(
 #[case::keyword_from_2024(Edition::Edition2024, &[])]
 fn module_names_follow_the_edition(#[case] edition: Edition, #[case] expected: &[&str]) {
     assert_eq!(
-        resolve_in(edition, "src/lib.rs", FileKind::ModRs, "mod gen;\n"),
+        resolve_in(
+            edition,
+            "src/lib.rs",
+            FileKind::ModRs,
+            "mod gen;\n",
+            |dir| { Some(dir.to_path_buf()) }
+        ),
         expected
+    );
+}
+
+/// - An inline module's `path` directory is entered only when it exists.
+/// - Its default directory is always entered, so a missing module's error names it.
+#[rstest]
+#[case::no_directory_exists(
+    &[],
+    &["5: src/m/k/n.rs NonModRs, src/m/k/n/mod.rs ModRs"]
+)]
+#[case::path_directory_exists(
+    &["src/u"],
+    &["5: src/m/k/n.rs NonModRs, src/m/k/n/mod.rs ModRs, src/u/k/n.rs NonModRs, src/u/k/n/mod.rs ModRs"]
+)]
+#[case::path_directory_inside_the_default_one(
+    &["src/m", "src/m/v"],
+    &["5: src/m/k/n.rs NonModRs, src/m/k/n/mod.rs ModRs, src/m/v/n.rs NonModRs, src/m/v/n/mod.rs ModRs"]
+)]
+#[case::path_directories_at_both_levels(
+    &["src/u", "src/u/v"],
+    &["5: src/m/k/n.rs NonModRs, src/m/k/n/mod.rs ModRs, src/u/k/n.rs NonModRs, src/u/k/n/mod.rs ModRs, src/u/v/n.rs NonModRs, src/u/v/n/mod.rs ModRs"]
+)]
+fn inline_path_locations_need_an_existing_directory(
+    #[case] directories: &[&str],
+    #[case] expected: &[&str],
+) {
+    let text = "#[cfg_attr(unix, path = \"u\")]\nmod m {\n    #[cfg_attr(unix, path = \"v\")]\n    mod k {\n        mod n;\n    }\n}\n";
+    let existing = |dir: &Path| {
+        directories
+            .iter()
+            .any(|known| dir == Path::new(known))
+            .then(|| dir.to_path_buf())
+    };
+    assert_eq!(
+        resolve_in(
+            Edition::Edition2024,
+            "src/lib.rs",
+            FileKind::ModRs,
+            text,
+            existing
+        ),
+        expected
+    );
+}
+
+/// - A directory the lookup gives no answer for is entered as written, a `cfg_attr` one too.
+/// - So each candidate file below it gets the lookup's answer in turn.
+#[test]
+fn unanswered_directory_is_entered_as_written() {
+    let text = "#[cfg_attr(unix, path = \"../u\")]\nmod m {\n    mod n;\n}\n";
+    let declarations = declarations(text, Edition::Edition2024).unwrap();
+    let declaration = declarations.first().unwrap();
+    let directory = |dir: &Path| {
+        Ok(if dir == Path::new("src/../u") {
+            Directory::AsWritten
+        } else {
+            Directory::Absent
+        })
+    };
+    let files: Vec<String> = candidates(
+        Path::new("src"),
+        OsStr::new("lib.rs"),
+        FileKind::ModRs,
+        declaration,
+        directory,
+    )
+    .unwrap()
+    .iter()
+    .map(|candidate| candidate.path.display().to_string())
+    .collect();
+    assert_eq!(
+        files,
+        [
+            "src/m/n.rs",
+            "src/m/n/mod.rs",
+            "src/../u/n.rs",
+            "src/../u/n/mod.rs"
+        ]
+    );
+}
+
+/// - An existing directory is named by the normalized path the lookup gives, and entered once.
+/// - `directories`: each existing directory as written, with its normalized path.
+#[rstest]
+#[case::cfg_attr_directory_is_named_normalized(
+    "x/../u",
+    &[("src/x/../u", "src/u")],
+    &["3: src/m/n.rs NonModRs, src/m/n/mod.rs ModRs, src/u/n.rs NonModRs, src/u/n/mod.rs ModRs"]
+)]
+#[case::two_spellings_of_one_directory_are_entered_once(
+    "../src/m",
+    &[("src/m", "src/m"), ("src/../src/m", "src/m")],
+    &["3: src/m/n.rs NonModRs, src/m/n/mod.rs ModRs"]
+)]
+fn existing_directories_are_named_by_their_normalized_path(
+    #[case] path: &str,
+    #[case] directories: &[(&str, &str)],
+    #[case] expected: &[&str],
+) {
+    let text = format!("#[cfg_attr(unix, path = \"{path}\")]\nmod m {{\n    mod n;\n}}\n");
+    let existing = |dir: &Path| {
+        directories
+            .iter()
+            .find(|(known, _)| dir == Path::new(known))
+            .map(|(_, normalized)| PathBuf::from(normalized))
+    };
+    assert_eq!(
+        resolve_in(
+            Edition::Edition2024,
+            "src/lib.rs",
+            FileKind::ModRs,
+            &text,
+            existing
+        ),
+        expected
+    );
+}
+
+/// A fixed `path` replaces the default location, so it is entered even when it is missing.
+#[rstest]
+#[case::outer_path("#[path = \"other\"]\nmod m {\n    mod n;\n}\n")]
+#[case::inner_path("mod m {\n    #![path = \"other\"]\n    mod n;\n}\n")]
+fn fixed_inline_path_is_entered_without_a_directory(#[case] text: &str) {
+    assert_eq!(
+        resolve_in(
+            Edition::Edition2024,
+            "src/lib.rs",
+            FileKind::ModRs,
+            text,
+            |_| None
+        ),
+        ["3: src/other/n.rs NonModRs, src/other/n/mod.rs ModRs"]
     );
 }
 

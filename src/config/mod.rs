@@ -1,9 +1,9 @@
 use anyhow::Result;
 use serde::Deserialize;
+use std::path::{Component, Path};
 
-/// Workspace facts samlinter cannot derive; every key is required.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+/// What the rules read from `samlinter.toml`.
+#[derive(Debug)]
 pub struct Config {
     /// - Words or phrases banned in comments, Rust and TOML, and README files.
     /// - Matched case-sensitively as whole words.
@@ -16,9 +16,39 @@ pub struct Config {
     pub subscriber_crates: Vec<Word>,
 }
 
-impl Config {
+/// `samlinter.toml` parsed: what the rules read, and the paths no rule applies to.
+#[derive(Debug)]
+pub struct Settings {
+    pub config: Config,
+    /// Checked against the disk by the workspace loader, which keeps only the checked form.
+    pub exclude: Vec<ExcludeEntry>,
+}
+
+/// `samlinter.toml` as written: workspace facts samlinter cannot derive; every key but
+/// `exclude` is required.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct File {
+    forbidden_words: Vec<Word>,
+    subscriber_crates: Vec<Word>,
+    #[serde(default)]
+    exclude: Vec<ExcludeEntry>,
+}
+
+impl Settings {
     pub fn parse(text: &str) -> Result<Self> {
-        Ok(toml_edit::de::from_str(text)?)
+        let File {
+            forbidden_words,
+            subscriber_crates,
+            exclude,
+        } = toml_edit::de::from_str(text)?;
+        Ok(Self {
+            config: Config {
+                forbidden_words,
+                subscriber_crates,
+            },
+            exclude,
+        })
     }
 }
 
@@ -43,6 +73,42 @@ impl TryFrom<String> for Word {
         } else {
             Ok(Self(entry))
         }
+    }
+}
+
+/// - An `exclude` entry: a `Word` that is a relative path, none of whose `..` climbs above the
+///   workspace root it is relative to.
+/// - Checked when the file parses, so the error quotes the key's line; the disk is checked
+///   later, by the workspace loader.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ExcludeEntry(Word);
+
+impl ExcludeEntry {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl TryFrom<String> for ExcludeEntry {
+    type Error = String;
+
+    fn try_from(entry: String) -> Result<Self, Self::Error> {
+        let word = Word::try_from(entry).map_err(str::to_owned)?;
+        let text = word.as_str();
+        Path::new(text)
+            .components()
+            .try_fold(0_usize, |depth, component| match component {
+                Component::Prefix(_) | Component::RootDir => Err(format!(
+                    "`exclude` entry `{text}` is absolute; write it relative to the workspace root"
+                )),
+                Component::CurDir => Ok(depth),
+                Component::ParentDir => depth.checked_sub(1).ok_or_else(|| {
+                    format!("`exclude` entry `{text}` climbs above the workspace root")
+                }),
+                Component::Normal(_) => Ok(depth.saturating_add(1)),
+            })?;
+        Ok(Self(word))
     }
 }
 

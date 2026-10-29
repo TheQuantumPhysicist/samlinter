@@ -1,10 +1,3 @@
-// - TODO: randomized variant: a random dependency in a random declaration form (version
-//   string, inline workspace table, dotted key, `[dependencies.x]`, path) and section gives
-//   the rule that form implies.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
 use super::super::{PROFILES, render, text_file};
 use super::{FixedRule, Role, Violation, check};
 use crate::config::{Config, words};

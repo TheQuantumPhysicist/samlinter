@@ -1,9 +1,3 @@
-// - TODO: randomized variant: random dependency names, some exempted and some violating: a
-//   violation its entry covers is dropped, an entry with no violation is unfulfilled.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
 use super::super::super::{place, render, text_file};
 use super::super::{feature_flags, member_versions};
 use super::apply;

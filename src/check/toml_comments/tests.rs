@@ -1,10 +1,3 @@
-// - TODO: randomized variant: random prose findings placed in random comments among random
-//   keys and strings of every kind come out at their own line:column, and the same text in a
-//   string value gives none.
-// - Postponed: test randomness must come from the `randomness` crate, which is not
-//   available to this crate yet.
-// - Plan: add it as a dev-dependency, then write this as an rstest `#[trace]` case over a
-//   seeded ChaCha20 RNG with a fresh seed per run.
 use super::super::{render, text_file};
 use super::check;
 use crate::config::words;

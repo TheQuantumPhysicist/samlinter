@@ -19,10 +19,12 @@ use crate::workspace::TextFile;
 use std::path::{Path, PathBuf};
 
 /// - Every finding in the workspace, sorted by path as output shows it, position and rule.
-/// - Identical findings print once: one README can be several packages' README, through a
-///   symlink say, and each package keeps it so `binary_readme` sees it.
+/// - Identical findings print once: an exemption that names a rule twice reports one
+///   unfulfilled finding.
+/// - A finding in an excluded file is dropped here, the one place for every rule.
 /// - An error is a finding samlinter cannot place, always a samlinter bug.
-pub fn run(workspace: &Workspace, config: &Config) -> Result<Vec<Finding>> {
+pub fn run(workspace: &Workspace) -> Result<Vec<Finding>> {
+    let config = &workspace.settings;
     let root = root_findings(&workspace.root, config)?;
     let members = workspace
         .members
@@ -37,6 +39,7 @@ pub fn run(workspace: &Workspace, config: &Config) -> Result<Vec<Finding>> {
             &workspace.config,
             &config.forbidden_words,
         ))
+        .filter(|finding| !workspace.excludes(&finding.path))
         .collect();
     Ok(findings.into_iter().collect())
 }

@@ -1,16 +1,21 @@
+mod exclude;
+mod lookup;
 mod modules;
 mod ownership;
 
+use crate::config::{Config, Settings};
 use anyhow::{Context, Result, anyhow, bail};
 use cargo_metadata::cargo_platform::Platform;
 use cargo_metadata::{DependencyKind, Metadata, MetadataCommand, TargetKind};
-use modules::{Candidate, FileKind};
+pub use lookup::Excluded;
+use lookup::{Disk, FileAt, Files, Looked, lexical, look, relative};
+use modules::{Candidate, Declaration, Directory, FileKind};
 use ownership::owned_sources;
 use ra_ap_syntax::Edition;
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs;
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -21,8 +26,7 @@ const README: &str = "README.md";
 const CONFIG: &str = "samlinter.toml";
 
 pub struct TextFile {
-    /// The file's canonical absolute path, so `tests/../src/x.rs` or a symlink names the file
-    /// it reaches.
+    /// The file's absolute path, lexically normalized: `tests/../src/x.rs` is `src/x.rs`.
     pub path: PathBuf,
     /// `path` as output shows it: relative to the workspace root, absolute outside it.
     pub shown: PathBuf,
@@ -46,12 +50,11 @@ pub struct Package {
     pub edition: Edition,
     pub dependencies: Vec<Dependency>,
     /// The files this package owns among its target roots and the files their `mod`
-    /// declarations reach, ordered by canonical path.
+    /// declarations reach, ordered by path.
     pub sources: Vec<TextFile>,
 }
 
-/// The `README.md` in the directory cargo names a package by, the parent of the manifest path
-/// as given: a symlinked manifest does not move it.
+/// The `README.md` beside the package's manifest.
 pub enum Readme {
     Found(TextFile),
     Missing {
@@ -103,30 +106,49 @@ pub struct Workspace {
     pub members: Vec<Package>,
     /// `samlinter.toml` at the root.
     pub config: TextFile,
+    /// What the rules read from `config`.
+    pub settings: Config,
+    /// The `exclude` entries of `config`, checked against the disk.
+    pub excluded: Excluded,
+    /// The workspace root, absolute and lexically normalized.
+    pub root_dir: PathBuf,
+    /// The modules and cargo paths samlinter does not follow, sorted, each once.
+    pub warnings: Vec<Warning>,
 }
 
-/// The file system as discovery uses it, so the module traversal runs in tests without disk.
-trait Files {
-    fn read(&self, path: &Path) -> io::Result<String>;
-
-    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
-
-    fn is_file(&self, path: &Path) -> bool;
+impl Workspace {
+    /// - Whether the file output shows as `shown` is excluded.
+    /// - `shown` joined to the root is the absolute path again; an absolute `shown` stays itself.
+    pub fn excludes(&self, shown: &Path) -> bool {
+        self.excluded.covers(&self.root_dir.join(shown))
+    }
 }
 
-struct Disk;
+/// - A path samlinter does not follow: it climbs with `..` out of a symlinked workspace root,
+///   or a symlinked directory above it, where only following the link tells where it leads.
+/// - Paths as output shows them.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Warning {
+    /// A `mod` declaration with such a candidate, by its file and line.
+    Module { file: PathBuf, line: usize },
+    /// A target root or manifest `cargo metadata` reports, as cargo writes it.
+    Cargo { path: PathBuf },
+}
 
-impl Files for Disk {
-    fn read(&self, path: &Path) -> io::Result<String> {
-        fs::read_to_string(path)
-    }
-
-    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
-        fs::canonicalize(path)
-    }
-
-    fn is_file(&self, path: &Path) -> bool {
-        path.is_file()
+impl fmt::Display for Warning {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Module { file, line } => write!(
+                formatter,
+                "{}:{line}: `#[path]` climbs above the symlinked workspace root; module not followed",
+                file.display()
+            ),
+            Self::Cargo { path } => write!(
+                formatter,
+                "{}: climbs above the symlinked workspace root; not followed",
+                path.display()
+            ),
+        }
     }
 }
 
@@ -145,41 +167,51 @@ struct PackageMetadata {
 ///   children, so the walk follows each route once.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct Route {
-    /// The canonical directory of the path the route names.
+    /// The directory of the path the route names.
     dir: PathBuf,
-    /// The file name as the route names it: the compiler resolves a symlinked file's children
-    /// beside the link.
     name: OsString,
     kind: FileKind,
 }
 
 impl Route {
-    fn of(files: &impl Files, file: &Path, kind: FileKind) -> Result<Self> {
+    fn of(root_dir: &Path, file: &Path, kind: FileKind) -> Result<Self> {
         let (dir, name) = file
             .parent()
             .zip(file.file_name())
-            .with_context(|| format!("{} names no file", file.display()))?;
+            .with_context(|| format!("{} names no file", relative(root_dir, file).display()))?;
         Ok(Self {
-            dir: canonical(files, dir)?,
+            dir: dir.to_path_buf(),
             name: name.to_os_string(),
             kind,
         })
-    }
-
-    fn file(&self) -> PathBuf {
-        self.dir.join(&self.name)
     }
 }
 
 /// Source files read so far, by the route that reached each.
 type Sources = BTreeMap<Route, TextFile>;
 
+/// What one package's module walk has found so far.
+#[derive(Default)]
+struct Tree {
+    sources: Sources,
+    warnings: BTreeSet<Warning>,
+}
+
+impl Tree {
+    fn warned(self, warning: Warning) -> Self {
+        Self {
+            warnings: self.warnings.into_iter().chain([warning]).collect(),
+            ..self
+        }
+    }
+}
+
 /// One package as discovery reads it, before ownership is decided.
 struct Reached {
     metadata: PackageMetadata,
-    /// The canonical form of the directory cargo names the package by, the parent of the
-    /// manifest path as given: a symlinked manifest does not move it.
-    dir: PathBuf,
+    /// - The manifest, walked once; `load_package` reads it.
+    /// - Read only after every package's module walk, so module errors come first.
+    manifest: Looked,
     /// The source files it reaches.
     sources: Vec<TextFile>,
 }
@@ -187,23 +219,34 @@ struct Reached {
 /// One package once ownership is decided, before it becomes a `Package`.
 struct Owned {
     metadata: PackageMetadata,
-    /// As `Reached.dir`.
-    dir: PathBuf,
+    /// As `Reached.manifest`.
+    manifest: Looked,
     /// The reached source files it owns.
     sources: Vec<TextFile>,
 }
 
-/// Each package by its canonical manifest path.
+/// Each package by its manifest path, lexically normalized.
 type ByManifest = BTreeMap<PathBuf, Reached>;
+
+/// What walking one package comes to.
+enum PackageWalk {
+    Reached {
+        package: Reached,
+        warnings: BTreeSet<Warning>,
+    },
+    /// Its manifest climbs out of a symlinked root, so the package is not followed.
+    NotFollowed(Warning),
+}
 
 pub fn load(manifest_path: Option<&Path>) -> Result<Workspace> {
     let metadata = metadata(manifest_path)?;
+    let workspace_root = metadata.workspace_root.as_std_path();
     let packages = metadata
         .workspace_packages()
         .into_iter()
-        .map(package_metadata)
+        .map(|package| package_metadata(&lexical(workspace_root), package))
         .collect::<Result<Vec<_>>>()?;
-    assemble(&Disk, metadata.workspace_root.as_std_path(), packages)
+    assemble(&Disk, workspace_root, packages)
 }
 
 fn metadata(manifest_path: Option<&Path>) -> Result<Metadata> {
@@ -215,10 +258,12 @@ fn metadata(manifest_path: Option<&Path>) -> Result<Metadata> {
     command.exec().context("`cargo metadata` failed")
 }
 
-fn package_metadata(package: &cargo_metadata::Package) -> Result<PackageMetadata> {
+/// One package `cargo metadata` reports; an error names its manifest as output shows it.
+fn package_metadata(root_dir: &Path, package: &cargo_metadata::Package) -> Result<PackageMetadata> {
     let manifest_path = package.manifest_path.as_std_path().to_path_buf();
-    let edition = edition(&manifest_path, package.edition.as_str())?;
-    let dependencies = dependencies(&manifest_path, &package.dependencies)?;
+    let shown = relative(root_dir, &manifest_path);
+    let edition = edition(&shown, package.edition.as_str())?;
+    let dependencies = dependencies(&shown, &package.dependencies)?;
     Ok(PackageMetadata {
         kind: package_kind(package),
         edition,
@@ -232,79 +277,140 @@ fn package_metadata(package: &cargo_metadata::Package) -> Result<PackageMetadata
     })
 }
 
-/// Reads every package's sources, gives each source file to one package, builds the packages,
-/// splits off the root, then reads the config.
+/// - Reads the config, since its `exclude` decides which sources are read.
+/// - Then reads every package's sources, gives each source file to one package, builds the
+///   packages and splits off the root.
 fn assemble(
     files: &impl Files,
     workspace_root: &Path,
     packages: Vec<PackageMetadata>,
 ) -> Result<Workspace> {
-    // Canonical, like the file paths compared with it.
-    let root_dir = canonical(files, workspace_root)?;
-    let reached = packages
-        .into_iter()
-        .map(|package| reached_sources(files, &root_dir, package))
-        .collect::<Result<Vec<_>>>()?;
-    let reached = by_manifest(&root_dir, reached)?;
+    // Taken as given, never looked up on the way in: it may sit below a system symlink, such as
+    // `/tmp` on macOS.
+    let root_dir = &lexical(workspace_root);
+    let config = config(files, root_dir)?;
+    let invalid = || format!("invalid {}", config.shown.display());
+    let Settings {
+        config: settings,
+        exclude,
+    } = Settings::parse(&config.text).with_context(invalid)?;
+    let excluded = exclude::resolve(files, root_dir, &exclude).with_context(invalid)?;
+
+    let (reached, warnings) = packages.into_iter().try_fold(
+        (Vec::new(), BTreeSet::new()),
+        |(reached, warnings): (Vec<Reached>, BTreeSet<Warning>), package| {
+            Ok::<_, anyhow::Error>(
+                match reached_sources(files, root_dir, &excluded, package)? {
+                    PackageWalk::Reached {
+                        package,
+                        warnings: found,
+                    } => (
+                        reached.into_iter().chain([package]).collect(),
+                        warnings.into_iter().chain(found).collect(),
+                    ),
+                    PackageWalk::NotFollowed(warning) => {
+                        (reached, warnings.into_iter().chain([warning]).collect())
+                    }
+                },
+            )
+        },
+    )?;
+    let reached = by_manifest(root_dir, reached)?;
 
     let packages = owned_sources(reached)
         .into_iter()
-        .map(|(manifest, package)| Ok((manifest, load_package(files, &root_dir, package)?)))
+        .map(|(manifest, package)| Ok((manifest, load_package(files, root_dir, package)?)))
         .collect::<Result<BTreeMap<_, _>>>()?;
 
-    let (root, members) = split_root(files, &root_dir, packages)?;
+    let (root, members) = split_root(files, root_dir, packages)?;
     Ok(Workspace {
         root,
         members,
-        config: config(files, &root_dir)?,
+        config,
+        settings,
+        excluded,
+        root_dir: root_dir.clone(),
+        warnings: warnings.into_iter().collect(),
     })
 }
 
-/// The package's canonical manifest path, and the package with every source file it reaches.
+/// - The package with every source file it reaches outside `excluded`, and the paths it does
+///   not follow.
+/// - Cargo's paths, the manifest and each target root, are walked from scratch here, like the
+///   README (`readme`) and `samlinter.toml` (`config`) elsewhere; every module file below is
+///   walked once, in `look_up`.
+/// - Only module files, target roots included, can be excluded; a manifest is always read.
 fn reached_sources(
     files: &impl Files,
     root_dir: &Path,
+    excluded: &Excluded,
     package: PackageMetadata,
-) -> Result<(PathBuf, Reached)> {
-    let dir = package.manifest_path.parent().with_context(|| {
-        format!(
-            "{} has no parent directory",
-            package.manifest_path.display()
-        )
-    })?;
-    let dir = canonical(files, dir)?;
-    let sources = package
-        .roots
-        .iter()
-        .try_fold(Sources::new(), |sources, root| {
-            module_tree(
-                files,
-                root_dir,
-                package.edition,
-                sources,
-                root,
-                FileKind::ModRs,
-            )
-        })?;
-    Ok((
-        canonical(files, &package.manifest_path)?,
-        Reached {
-            metadata: package,
-            dir,
-            sources: one_per_file(sources),
-        },
-    ))
+) -> Result<PackageWalk> {
+    match look(
+        files,
+        root_dir,
+        &Excluded::default(),
+        &package.manifest_path,
+    )? {
+        Looked::AboveLinkedRoot => Ok(PackageWalk::NotFollowed(Warning::Cargo {
+            path: relative(root_dir, &package.manifest_path),
+        })),
+        manifest
+        @ (Looked::File(_) | Looked::Directory(_) | Looked::Neither | Looked::Excluded) => {
+            let tree = package
+                .roots
+                .iter()
+                .try_fold(Tree::default(), |tree, root| {
+                    target_root(files, root_dir, package.edition, excluded, tree, root)
+                })?;
+            Ok(PackageWalk::Reached {
+                package: Reached {
+                    metadata: package,
+                    manifest,
+                    sources: one_per_file(tree.sources),
+                },
+                warnings: tree.warnings,
+            })
+        }
+    }
 }
 
-/// - `reached` keyed by canonical manifest path.
-/// - Two packages resolving to one manifest, through a symlink say, are an error: either
-///   would hide the other.
-fn by_manifest(root_dir: &Path, reached: Vec<(PathBuf, Reached)>) -> Result<ByManifest> {
+/// `tree` plus every file the target root cargo reports at `written` reaches.
+fn target_root(
+    files: &impl Files,
+    root_dir: &Path,
+    edition: Edition,
+    excluded: &Excluded,
+    tree: Tree,
+    written: &Path,
+) -> Result<Tree> {
+    match look(files, root_dir, excluded, written)? {
+        Looked::File(file) => module_tree(
+            files,
+            root_dir,
+            edition,
+            excluded,
+            tree,
+            file,
+            FileKind::ModRs,
+        ),
+        Looked::Excluded => Ok(tree),
+        Looked::AboveLinkedRoot => Ok(tree.warned(Warning::Cargo {
+            path: relative(root_dir, written),
+        })),
+        looked @ (Looked::Directory(_) | Looked::Neither) => {
+            read_looked(files, root_dir, written, looked).map(|_| tree)
+        }
+    }
+}
+
+/// - `reached` keyed by manifest path.
+/// - Two packages on one manifest are an error: either would hide the other.
+fn by_manifest(root_dir: &Path, reached: Vec<Reached>) -> Result<ByManifest> {
     reached
         .into_iter()
-        .try_fold(
-            ByManifest::new(),
-            |mut packages, (manifest, package)| match packages.entry(manifest) {
+        .try_fold(ByManifest::new(), |mut packages, package| {
+            match packages.entry(lexical(&package.metadata.manifest_path)) {
                 Entry::Vacant(slot) => {
                     slot.insert(package);
                     Ok(packages)
@@ -313,21 +419,20 @@ fn by_manifest(root_dir: &Path, reached: Vec<(PathBuf, Reached)>) -> Result<ByMa
                     "{}: two workspace packages resolve to this manifest",
                     relative(root_dir, slot.key()).display()
                 )),
-            },
-        )
+            }
+        })
 }
 
 /// - The package whose manifest is the root `Cargo.toml` is the root package.
 /// - Without one, the root is virtual.
 /// - Every other package is a member.
-/// - `packages` is keyed by canonical manifest path, so the root manifest is looked up by its
-///   canonical path too.
+/// - `packages` is keyed by manifest path, lexically normalized.
 fn split_root(
     files: &impl Files,
     root_dir: &Path,
     mut packages: BTreeMap<PathBuf, Package>,
 ) -> Result<(Root, Vec<Package>)> {
-    let root_manifest = canonical(files, &root_dir.join(MANIFEST))?;
+    let root_manifest = root_dir.join(MANIFEST);
     let root = match packages.remove(&root_manifest) {
         Some(package) => Root::Package(package),
         None => Root::Virtual {
@@ -338,35 +443,45 @@ fn split_root(
     Ok((root, packages.into_values().collect()))
 }
 
+/// The package from what discovery found; its README sits beside the manifest read.
 fn load_package(files: &impl Files, root_dir: &Path, owned: Owned) -> Result<Package> {
     let Owned {
         metadata,
-        dir,
+        manifest,
         sources,
     } = owned;
+    let manifest = read_looked(files, root_dir, &metadata.manifest_path, manifest)?;
+    let dir = manifest.path.parent().with_context(|| {
+        format!(
+            "{} has no parent directory",
+            relative(root_dir, &manifest.path).display()
+        )
+    })?;
     Ok(Package {
-        manifest: read(files, root_dir, &metadata.manifest_path)?,
+        readme: readme(files, root_dir, dir)?,
+        manifest,
         kind: metadata.kind,
-        readme: readme(files, root_dir, &dir)?,
         edition: metadata.edition,
         dependencies: metadata.dependencies,
         sources,
     })
 }
 
-/// `samlinter.toml` at the root; every workspace needs one.
+/// `samlinter.toml` at the root, read first; every workspace needs one.
 fn config(files: &impl Files, root_dir: &Path) -> Result<TextFile> {
-    let path = root_dir.join(CONFIG);
-    let text = files.read(&path).map_err(|error| {
-        anyhow::Error::new(error).context(format!(
-            "cannot read {}; every workspace needs one, see the README",
-            path.display()
-        ))
-    })?;
-    Ok(TextFile::new(root_dir, canonical(files, &path)?, text))
+    let written = root_dir.join(CONFIG);
+    let looked = look(files, root_dir, &Excluded::default(), &written)?;
+    text_of(files, &written, looked)
+        .map(|(path, text)| TextFile::new(root_dir, path, text))
+        .map_err(|(path, error)| {
+            anyhow::Error::new(error).context(format!(
+                "cannot read {}; every workspace needs one, see the README",
+                relative(root_dir, &path).display()
+            ))
+        })
 }
 
-/// A file several routes reach is linted once, ordered by its canonical path.
+/// A file several routes reach is linted once, ordered by its path.
 fn one_per_file(sources: Sources) -> Vec<TextFile> {
     let by_path: BTreeMap<PathBuf, TextFile> = sources
         .into_values()
@@ -384,44 +499,103 @@ fn edition(manifest_path: &Path, edition: &str) -> Result<Edition> {
     })
 }
 
-/// `sources` plus `file` and every file its `mod` declarations reach along this route.
+/// `tree` plus `file` and every file its `mod` declarations reach along this route.
 fn module_tree(
     files: &impl Files,
     root_dir: &Path,
     edition: Edition,
-    mut sources: Sources,
-    file: &Path,
+    excluded: &Excluded,
+    tree: Tree,
+    file: FileAt,
     kind: FileKind,
-) -> Result<Sources> {
-    let children = match sources.entry(Route::of(files, file, kind)?) {
+) -> Result<Tree> {
+    let Tree {
+        mut sources,
+        warnings,
+    } = tree;
+    let children = match sources.entry(Route::of(root_dir, file.path(), kind)?) {
         // Followed already, along with the files below it.
-        Entry::Occupied(_) => Vec::new(),
+        Entry::Occupied(_) => Children::default(),
         Entry::Vacant(slot) => {
-            let route = slot.key();
-            let file = route.file();
-            let source =
-                TextFile::new(root_dir, canonical(files, &file)?, read_text(files, &file)?);
-            let children = child_files(files, root_dir, route, &source, edition)?;
+            let source = read_file(files, root_dir, file)?;
+            let children = child_files(files, root_dir, excluded, slot.key(), &source, edition)?;
             slot.insert(source);
             children
         }
     };
 
-    children.iter().try_fold(sources, |sources, child| {
-        module_tree(files, root_dir, edition, sources, &child.path, child.kind)
-    })
+    let tree = Tree {
+        sources,
+        warnings: warnings.into_iter().chain(children.warnings).collect(),
+    };
+    children
+        .found
+        .into_iter()
+        .try_fold(tree, |tree, Child { file, kind }| {
+            module_tree(files, root_dir, edition, excluded, tree, file, kind)
+        })
 }
 
-/// - The files the `mod` declarations in `source` name, every existing candidate of each.
-/// - A declaration with no file is an error: `cargo check` rejects it too unless cfg removes
-///   the module, and skipping it would hide that module's code.
+/// What the `mod` declarations of one file lead to.
+#[derive(Default)]
+struct Children {
+    /// Every existing candidate of each declaration.
+    found: Vec<Child>,
+    /// The declarations with a candidate climbing out of a symlinked root.
+    warnings: Vec<Warning>,
+}
+
+impl Children {
+    /// - `self` plus what `declaration`, in the file output shows as `shown`, comes to.
+    /// - A declaration with no file is an error: `cargo check` rejects it too unless cfg
+    ///   removes the module, and skipping it would hide that module's code.
+    fn with(
+        self,
+        root_dir: &Path,
+        shown: &Path,
+        declaration: &Declaration,
+        resolution: Resolution,
+    ) -> Result<Self> {
+        match resolution {
+            Resolution::Missing(tried) => bail!(
+                "{}:{}: no file for `mod {};`, tried {}",
+                shown.display(),
+                declaration.line,
+                declaration.module.name,
+                tried
+                    .iter()
+                    .map(|path| relative(root_dir, path).display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Resolution::Found(found) => Ok(Self {
+                found: self.found.into_iter().chain(found).collect(),
+                warnings: self.warnings,
+            }),
+            Resolution::AboveLinkedRoot(found) => Ok(Self {
+                found: self.found.into_iter().chain(found).collect(),
+                warnings: self
+                    .warnings
+                    .into_iter()
+                    .chain([Warning::Module {
+                        file: shown.to_path_buf(),
+                        line: declaration.line,
+                    }])
+                    .collect(),
+            }),
+        }
+    }
+}
+
+/// The files the `mod` declarations in `source` name, every existing candidate of each.
 fn child_files(
     files: &impl Files,
     root_dir: &Path,
+    excluded: &Excluded,
     route: &Route,
     source: &TextFile,
     edition: Edition,
-) -> Result<Vec<Candidate>> {
+) -> Result<Children> {
     let shown = &source.shown;
     let declarations = modules::declarations(&source.text, edition).map_err(|bad| {
         anyhow!(
@@ -431,42 +605,112 @@ fn child_files(
         )
     })?;
 
-    let found = declarations
+    declarations
         .iter()
-        .map(|declaration| {
-            let (existing, missing): (Vec<Candidate>, Vec<Candidate>) =
-                modules::candidates(&route.dir, &route.name, route.kind, declaration)
-                    .into_iter()
-                    .partition(|candidate| files.is_file(&candidate.path));
-            match existing.as_slice() {
-                [] => bail!(
-                    "{}:{}: no file for `mod {};`, tried {}",
-                    shown.display(),
-                    declaration.line,
-                    declaration.module.name,
-                    missing
-                        .iter()
-                        .map(|candidate| relative(root_dir, &candidate.path).display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-                [_, ..] => Ok(existing),
-            }
+        .try_fold(Children::default(), |children, declaration| {
+            let resolution = look_up(files, root_dir, excluded, route, declaration)?
+                .into_iter()
+                .fold(Resolution::Missing(Vec::new()), Resolution::with);
+            children.with(root_dir, shown, declaration, resolution)
         })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(found.into_iter().flatten().collect())
 }
 
-/// The dependencies of the package at `manifest_path`; an error names the manifest.
+/// A file a `mod` declaration names, found by `look`.
+struct Child {
+    file: FileAt,
+    kind: FileKind,
+}
+
+/// One candidate file of a `mod` declaration, once looked up.
+enum Lookup {
+    Found(Child),
+    /// No file, as written, as rustc names it.
+    Missing(PathBuf),
+    /// An `exclude` entry covers it: found, and never read.
+    Excluded,
+    /// Climbs out of a symlinked root, so where it leads is unknown.
+    AboveLinkedRoot,
+}
+
+/// What one `mod` declaration's candidates come to.
+enum Resolution {
+    /// No candidate is a file, excluded, or climbing out of a symlinked root: every path tried,
+    /// as written.
+    Missing(Vec<PathBuf>),
+    /// The candidates that are files; any one found or excluded makes the declaration resolve.
+    Found(Vec<Child>),
+    /// - A candidate climbs out of a symlinked root: the declaration is warned about, never an
+    ///   error, since a file may be where the link leads.
+    /// - The candidates that are files are followed all the same.
+    AboveLinkedRoot(Vec<Child>),
+}
+
+impl Resolution {
+    /// `self` with one more candidate looked up.
+    fn with(self, lookup: Lookup) -> Self {
+        match (self, lookup) {
+            (Self::Missing(tried), Lookup::Missing(path)) => {
+                Self::Missing(tried.into_iter().chain([path]).collect())
+            }
+            (Self::Missing(_), Lookup::Found(child)) => Self::Found(vec![child]),
+            (Self::Missing(_), Lookup::Excluded) => Self::Found(Vec::new()),
+            (Self::Missing(_), Lookup::AboveLinkedRoot) => Self::AboveLinkedRoot(Vec::new()),
+            (Self::Found(found), Lookup::Missing(_) | Lookup::Excluded) => Self::Found(found),
+            (Self::Found(found), Lookup::Found(child)) => {
+                Self::Found(found.into_iter().chain([child]).collect())
+            }
+            (Self::Found(found), Lookup::AboveLinkedRoot)
+            | (
+                Self::AboveLinkedRoot(found),
+                Lookup::Missing(_) | Lookup::Excluded | Lookup::AboveLinkedRoot,
+            ) => Self::AboveLinkedRoot(found),
+            (Self::AboveLinkedRoot(found), Lookup::Found(child)) => {
+                Self::AboveLinkedRoot(found.into_iter().chain([child]).collect())
+            }
+        }
+    }
+}
+
+/// Each candidate file of `declaration`, found along `route`, looked up.
+fn look_up(
+    files: &impl Files,
+    root_dir: &Path,
+    excluded: &Excluded,
+    route: &Route,
+    declaration: &Declaration,
+) -> Result<Vec<Lookup>> {
+    let candidates =
+        modules::candidates(&route.dir, &route.name, route.kind, declaration, |dir| {
+            Ok(match look(files, root_dir, excluded, dir)? {
+                Looked::Directory(path) => Directory::At(path),
+                Looked::Excluded | Looked::AboveLinkedRoot => Directory::AsWritten,
+                Looked::File(_) | Looked::Neither => Directory::Absent,
+            })
+        })?;
+    candidates
+        .into_iter()
+        .map(|Candidate { path, kind }| {
+            Ok(match look(files, root_dir, excluded, &path)? {
+                Looked::File(file) => Lookup::Found(Child { file, kind }),
+                Looked::Directory(_) | Looked::Neither => Lookup::Missing(path),
+                Looked::Excluded => Lookup::Excluded,
+                Looked::AboveLinkedRoot => Lookup::AboveLinkedRoot,
+            })
+        })
+        .collect()
+}
+
+/// The dependencies of the package whose manifest output shows as `manifest`; an error names
+/// it.
 fn dependencies(
-    manifest_path: &Path,
+    manifest: &Path,
     dependencies: &[cargo_metadata::Dependency],
 ) -> Result<Vec<Dependency>> {
     dependencies
         .iter()
         .map(dependency)
         .collect::<Result<_>>()
-        .with_context(|| manifest_path.display().to_string())
+        .with_context(|| manifest.display().to_string())
 }
 
 fn dependency(dependency: &cargo_metadata::Dependency) -> Result<Dependency> {
@@ -509,46 +753,81 @@ fn package_kind(package: &cargo_metadata::Package) -> PackageKind {
     }
 }
 
-/// `Missing` only when there is no `README.md`: an unreadable one is an error, not a missing
-/// one.
+/// - `Missing` only when nothing is there, by the same rule as module files (`look`).
+/// - A directory or an unreadable file is an error, not a missing README.
 fn readme(files: &impl Files, root_dir: &Path, dir: &Path) -> Result<Readme> {
-    let path = dir.join(README);
-    match files.read(&path) {
-        Ok(text) => Ok(Readme::Found(TextFile::new(
-            root_dir,
-            canonical(files, &path)?,
-            text,
-        ))),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Readme::Missing {
-            expected: relative(root_dir, &path),
+    let written = dir.join(README);
+    match look(files, root_dir, &Excluded::default(), &written)? {
+        Looked::Neither => Ok(Readme::Missing {
+            expected: relative(root_dir, &written),
         }),
-        Err(error) => Err(cannot_read(error, &path)),
+        looked @ (Looked::File(_)
+        | Looked::Directory(_)
+        | Looked::Excluded
+        | Looked::AboveLinkedRoot) => {
+            read_looked(files, root_dir, &written, looked).map(Readme::Found)
+        }
     }
 }
 
-fn read(files: &impl Files, root_dir: &Path, path: &Path) -> Result<TextFile> {
-    let text = read_text(files, path)?;
-    Ok(TextFile::new(root_dir, canonical(files, path)?, text))
+/// The file at `written`, which no `exclude` entry applies to.
+fn read(files: &impl Files, root_dir: &Path, written: &Path) -> Result<TextFile> {
+    let looked = look(files, root_dir, &Excluded::default(), written)?;
+    read_looked(files, root_dir, written, looked)
 }
 
-fn read_text(files: &impl Files, path: &Path) -> Result<String> {
-    files.read(path).map_err(|error| cannot_read(error, path))
+fn read_file(files: &impl Files, root_dir: &Path, file: FileAt) -> Result<TextFile> {
+    let written = file.path().to_path_buf();
+    read_looked(files, root_dir, &written, Looked::File(file))
 }
 
-fn cannot_read(error: io::Error, path: &Path) -> anyhow::Error {
-    anyhow::Error::new(error).context(format!("cannot read {}", path.display()))
+/// - The text file `looked`, walked from `written`, names.
+/// - Anything but a readable file is an error naming the path as output shows it.
+fn read_looked(
+    files: &impl Files,
+    root_dir: &Path,
+    written: &Path,
+    looked: Looked,
+) -> Result<TextFile> {
+    text_of(files, written, looked)
+        .map(|(path, text)| TextFile::new(root_dir, path, text))
+        .map_err(|(path, error)| {
+            anyhow::Error::new(error).context(format!(
+                "cannot read {}",
+                relative(root_dir, &path).display()
+            ))
+        })
 }
 
-fn canonical(files: &impl Files, path: &Path) -> Result<PathBuf> {
-    files
-        .canonicalize(path)
-        .with_context(|| format!("cannot resolve {}", path.display()))
-}
-
-/// `path` relative to `root_dir`; a path outside it stays absolute.
-fn relative(root_dir: &Path, path: &Path) -> PathBuf {
-    path.strip_prefix(root_dir)
-        .map_or_else(|_| path.to_path_buf(), Path::to_path_buf)
+/// - The text of the file `looked`, walked from `written`, names, with its normalized path.
+/// - Otherwise why there is none, with the path to name: the normalized one when known,
+///   `written` when not; each caller words the error.
+fn text_of(
+    files: &impl Files,
+    written: &Path,
+    looked: Looked,
+) -> Result<(PathBuf, String), (PathBuf, io::Error)> {
+    match looked {
+        Looked::File(file) => match file.read(files) {
+            Ok(text) => Ok((file.into_path(), text)),
+            Err(error) => Err((file.into_path(), error)),
+        },
+        Looked::Directory(path) => Err((path, io::Error::from(io::ErrorKind::IsADirectory))),
+        Looked::Neither => Err((
+            written.to_path_buf(),
+            io::Error::from(io::ErrorKind::NotFound),
+        )),
+        Looked::Excluded => Err((
+            written.to_path_buf(),
+            io::Error::other("an `exclude` entry covers it"),
+        )),
+        Looked::AboveLinkedRoot => Err((
+            written.to_path_buf(),
+            io::Error::other(
+                "it climbs above the symlinked workspace root, which samlinter does not follow",
+            ),
+        )),
+    }
 }
 
 #[cfg(test)]
