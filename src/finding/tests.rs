@@ -65,6 +65,10 @@ fn finding_renders_path_position_rule_message(#[case] span: Span, #[case] expect
     "member_version",
     Ok(Exemptability::Manifest(ManifestExemptable::MemberVersion))
 )]
+#[case::module_shape(
+    "module_shape",
+    Ok(Exemptability::Source(SourceExemptable(Rule::ModuleShape)))
+)]
 #[case::not_exemptable("syntax_error", Ok(Exemptability::Never))]
 #[case::unknown("rest_patterns", Err("unknown rule `rest_patterns`"))]
 fn exemptions_name_existing_rules(
@@ -95,6 +99,7 @@ fn exempted_in(rule: Rule) -> &'static str {
 #[case::library_subscriber(Rule::LibrarySubscriber, "rust")]
 #[case::malformed_exemption(Rule::MalformedExemption, "nowhere")]
 #[case::member_version(Rule::MemberVersion, "cargo.toml")]
+#[case::module_shape(Rule::ModuleShape, "rust")]
 #[case::panic_strategy(Rule::PanicStrategy, "nowhere")]
 #[case::path_attr(Rule::PathAttr, "rust")]
 #[case::rest_pattern(Rule::RestPattern, "rust")]

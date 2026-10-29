@@ -35,6 +35,7 @@ pub enum Rule {
     LibrarySubscriber,
     MalformedExemption,
     MemberVersion,
+    ModuleShape,
     PanicStrategy,
     PathAttr,
     RestPattern,
@@ -63,6 +64,7 @@ impl Rule {
             | Self::ItemOrder
             | Self::ItemSpacing
             | Self::LibrarySubscriber
+            | Self::ModuleShape
             | Self::PathAttr
             | Self::RestPattern
             | Self::RestrictedVisibility => Exemptability::Source(SourceExemptable(self)),

@@ -1,6 +1,9 @@
 use super::Reach;
 use crate::finding::Position;
-use crate::syntax::{is_test_gated, is_test_module, path_value, requires_test};
+use crate::syntax::{
+    ModuleBody, is_test_gated, is_test_module, mod_keyword, module_body, module_items, path_value,
+    requires_test, unraw,
+};
 use anyhow::Result;
 use ra_ap_syntax::ast::{self, HasAttrs, HasModuleItem, HasName};
 use ra_ap_syntax::{AstNode, Edition, TextSize};
@@ -16,6 +19,19 @@ pub enum FileKind {
     ModRs,
     /// Any other module file, `a.rs`: children sit in the directory named after it, `a/`.
     NonModRs,
+}
+
+impl FileKind {
+    /// A file two routes reach keeps the shape any route gives it: a `NonModRs` route makes it
+    /// `NonModRs`, so the file is linted by the shape that declares submodules.
+    pub const fn either(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::ModRs, Self::ModRs) => Self::ModRs,
+            (Self::ModRs, Self::NonModRs) | (Self::NonModRs, Self::ModRs | Self::NonModRs) => {
+                Self::NonModRs
+            }
+        }
+    }
 }
 
 pub struct Candidate {
@@ -90,32 +106,6 @@ enum Location<'a> {
     Default,
     /// A `path` attribute's value, `Reach::NotLibrary` under a `cfg_attr` requiring `test`.
     Path { path: &'a str, reach: Reach },
-}
-
-/// How a `mod` item gives its contents.
-enum Body {
-    /// `mod name;`: in a file of its own.
-    OutOfLine,
-    /// `mod name { .. }`
-    Inline(ast::ItemList),
-}
-
-impl Body {
-    /// `None` for a `mod` with neither `;` nor an item list.
-    fn of(module: &ast::Module) -> Option<Self> {
-        module
-            .item_list()
-            .map(Self::Inline)
-            .or_else(|| module.semicolon_token().map(|_| Self::OutOfLine))
-    }
-
-    /// The inner `#![..]` attributes; only an inline module's item list holds them.
-    fn inner_attrs(&self) -> Vec<ast::Attr> {
-        match self {
-            Self::OutOfLine => Vec::new(),
-            Self::Inline(list) => list.attrs().collect(),
-        }
-    }
 }
 
 /// - The inline module a walk is inside, linked to the ones around it.
@@ -236,7 +226,7 @@ pub fn declarations(text: &str, edition: Edition) -> Result<Vec<Declaration>, Ba
     let (tree, _) = crate::syntax::parse(text, edition);
     in_items(
         text,
-        tree.items(),
+        crate::syntax::module_items(tree.items()),
         None,
         gate_reach(is_test_gated(tree.syntax())),
     )
@@ -255,30 +245,11 @@ const fn gate_reach(test_gated: bool) -> Reach {
 /// `reach` is that of the items' module: their file, then each inline module around them.
 fn in_items(
     text: &str,
-    items: impl Iterator<Item = ast::Item>,
+    modules: impl Iterator<Item = ast::Module>,
     enclosing: Option<&Enclosing>,
     reach: Reach,
 ) -> Result<Vec<Declaration>, BadPath> {
-    let nested = items
-        .filter_map(|item| match item {
-            ast::Item::Module(module) => Some(module),
-            ast::Item::AsmExpr(_)
-            | ast::Item::Const(_)
-            | ast::Item::Enum(_)
-            | ast::Item::ExternBlock(_)
-            | ast::Item::ExternCrate(_)
-            | ast::Item::Fn(_)
-            | ast::Item::Impl(_)
-            | ast::Item::MacroCall(_)
-            | ast::Item::MacroDef(_)
-            | ast::Item::MacroRules(_)
-            | ast::Item::Static(_)
-            | ast::Item::Struct(_)
-            | ast::Item::Trait(_)
-            | ast::Item::TypeAlias(_)
-            | ast::Item::Union(_)
-            | ast::Item::Use(_) => None,
-        })
+    let nested = modules
         .map(|module| in_module(text, &module, enclosing, reach))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(nested.into_iter().flatten().collect())
@@ -290,7 +261,7 @@ fn in_module(
     enclosing: Option<&Enclosing>,
     reach: Reach,
 ) -> Result<Vec<Declaration>, BadPath> {
-    match (module.name(), Body::of(module)) {
+    match (module.name(), module_body(module)) {
         (Some(name), Some(body)) => in_named_module(text, module, &name, body, enclosing, reach),
         // A `mod` without a name, or with neither `;` nor an item list, is a syntax error, which
         // the source check reports.
@@ -303,36 +274,32 @@ fn in_named_module(
     text: &str,
     module: &ast::Module,
     name: &ast::Name,
-    body: Body,
+    body: ModuleBody,
     enclosing: Option<&Enclosing>,
     reach: Reach,
 ) -> Result<Vec<Declaration>, BadPath> {
-    // - Invariant: the parser starts every module item at its `mod` keyword.
-    // - A missing keyword is a parser bug, not bad input, so there is nothing to report.
-    let keyword = module
-        .mod_token()
-        .expect("the parser builds every module item from its `mod` keyword");
+    let keyword = mod_keyword(module);
     // rustc reads the outer attributes, then an inline module's inner `#![..]` ones.
     let attributes = module.attrs().chain(body.inner_attrs()).filter_map(|attr| {
         let line = line(text, attr.syntax().text_range().start());
         attr.meta().map(|meta| (meta, line))
     });
     let this = Module {
-        name: name.text().trim_start_matches("r#").to_owned(),
+        name: unraw(name.text()).to_owned(),
         paths: paths(attributes)?,
     };
     let reach = reach.through(gate_reach(is_test_module(module)));
 
     match body {
-        Body::OutOfLine => Ok(vec![Declaration {
+        ModuleBody::OutOfLine => Ok(vec![Declaration {
             line: line(text, keyword.text_range().start()),
             inline: outermost_first(enclosing),
             module: this,
             reach,
         }]),
-        Body::Inline(list) => in_items(
+        ModuleBody::Inline(list) => in_items(
             text,
-            list.items(),
+            module_items(list.items()),
             Some(&Enclosing {
                 module: this,
                 outer: enclosing,

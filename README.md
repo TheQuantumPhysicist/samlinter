@@ -117,6 +117,7 @@ Rust sources are found the way the compiler finds them, not by listing directori
 | `forbidden_word` | a configured word or phrase in a comment |
 | `library_subscriber` | a call that installs a log subscriber in a library's code, see below |
 | `path_attr` | each `path` attribute: `#[path = ".."]`, `#![path = ".."]` and a `path` inside `cfg_attr(..)`, see below |
+| `module_shape` | a file the walk reaches as `something.rs` that declares an out-of-line module, see below |
 
 - `rest_pattern`: also on the left of a destructuring assignment, such as `(a, ..) = t;` or
   `(..) = t;`.
@@ -175,6 +176,18 @@ Rust sources are found the way the compiler finds them, not by listing directori
 - `path_attr`: exempted on the item that carries the attribute. An inner `#![path]` is
   exempted by an expect on the node it sits on: an outer expect on the enclosing inline
   module, or an inner expect at the top of that module or of the file.
+- `module_shape`: a module with submodules is a directory: the file is `something/mod.rs`,
+  with the submodules under `something/` (`something/tests.rs`, `something/other.rs`). The
+  rule flags each out-of-line `mod x;` in a file the walk reaches as `something.rs`, at the
+  `mod` keyword, whether or not the child file exists (a missing child is already an error
+  earlier), inside inline modules included.
+- `module_shape`: no finding in a `something/mod.rs` file declaring submodules, in an
+  inline module with no out-of-line declaration inside, in a file reached only through
+  `#[path]` (`path_attr` reports those), or in any target root. Test-gated code is linted
+  alike: a `tests.rs` module declaring helper files moves to `tests/mod.rs`. Modules
+  declared inside function bodies or macro bodies are not seen.
+- `module_shape`: exempted on the `mod x;` item, or by an inner expect at the top of the
+  file, which covers every declaration in it.
 
 The comment rules read every comment, doc comments included, also inside macro bodies.
 They read the `#` comments of every `Cargo.toml` samlinter checks and of `samlinter.toml`
@@ -256,7 +269,7 @@ Every exemption needs a reason, and is written in the kind of file its findings 
 
 - Rust: every rule with findings in Rust source, `rest_pattern`, `restricted_visibility`,
   `item_order`, `item_spacing`, `fn_spacing`, `em_dash`, `emoji`, `forbidden_word`,
-  `library_subscriber` and `path_attr`, on the node that holds the finding. A comment that belongs to no node
+  `library_subscriber`, `path_attr` and `module_shape`, on the node that holds the finding. A comment that belongs to no node
   cannot be exempted (see below).
 - A member `Cargo.toml`: `member_version`.
 - Nowhere: `syntax_error`, `malformed_exemption`, `unfulfilled_exemption` and the other

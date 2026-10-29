@@ -1,7 +1,8 @@
 use super::{PROFILES, run, text_file};
 use crate::config::{Config, words};
 use crate::workspace::{
-    Dependency, Excluded, Package, PackageKind, Readme, Root, Section, TextFile, Workspace,
+    Dependency, Excluded, FileKind, Package, PackageKind, Readme, Root, Section, SourceFile,
+    TextFile, Workspace,
 };
 use ra_ap_syntax::Edition;
 use rstest::rstest;
@@ -36,7 +37,10 @@ fn package(dir: &str, kind: PackageKind, source: &str) -> Package {
         readme: missing(&format!("{dir}README.md")),
         edition: Edition::Edition2024,
         dependencies: Vec::new(),
-        sources: vec![text_file(&format!("{dir}{source_name}"), source)],
+        sources: vec![SourceFile {
+            file: text_file(&format!("{dir}{source_name}"), source),
+            kind: FileKind::ModRs,
+        }],
         library_code: BTreeSet::new(),
     }
 }
@@ -59,7 +63,10 @@ fn workspace(edition: Edition, source: &str) -> Workspace {
             readme: missing("lib/README.md"),
             edition,
             dependencies: Vec::new(),
-            sources: vec![text_file("lib/src/lib.rs", source)],
+            sources: vec![SourceFile {
+                file: text_file("lib/src/lib.rs", source),
+                kind: FileKind::ModRs,
+            }],
             library_code: BTreeSet::new(),
         }],
     }
@@ -285,7 +292,10 @@ fn subscriber_workspace(lib_code: &[&str], member_code: &[&str]) -> Workspace {
             crate_name: "tracing-subscriber".to_owned(),
             section: Section::Normal,
         }],
-        sources: vec![text_file("lib/src/lib.rs", INSTALL)],
+        sources: vec![SourceFile {
+            file: text_file("lib/src/lib.rs", INSTALL),
+            kind: FileKind::ModRs,
+        }],
         library_code: code(lib_code),
     };
     let member = Package {
@@ -293,8 +303,14 @@ fn subscriber_workspace(lib_code: &[&str], member_code: &[&str]) -> Workspace {
         readme: missing("member/README.md"),
         dependencies: Vec::new(),
         sources: vec![
-            text_file("member/src/helper.rs", INSTALL),
-            text_file("member/src/lib.rs", INSTALL),
+            SourceFile {
+                file: text_file("member/src/helper.rs", INSTALL),
+                kind: FileKind::NonModRs,
+            },
+            SourceFile {
+                file: text_file("member/src/lib.rs", INSTALL),
+                kind: FileKind::ModRs,
+            },
         ],
         library_code: code(member_code),
         kind: PackageKind::Library,

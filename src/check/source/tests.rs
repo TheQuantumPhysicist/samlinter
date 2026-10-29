@@ -1,30 +1,42 @@
 use super::super::text_file;
-use super::{Installs, check};
+use super::{FileKind, Installs, check};
 use crate::config::{Config, words};
+use crate::workspace::TextFile;
 use ra_ap_syntax::Edition;
 use rstest::rstest;
+use std::path::PathBuf;
 
 const PHRASE: &str = "it is worth noting";
 
-fn findings_in(edition: Edition, installs: Installs, text: &str) -> Vec<String> {
+fn findings_in(edition: Edition, installs: Installs, kind: FileKind, text: &str) -> Vec<String> {
     let file = text_file("src/lib.rs", text);
     let config = Config {
         forbidden_words: words(&["NOTES.md", PHRASE]),
         subscriber_crates: Vec::new(),
     };
-    check(&file, edition, &config, installs)
+    check(&file, edition, &config, installs, kind)
         .iter()
         .map(ToString::to_string)
         .collect()
 }
 
 fn findings(text: &str) -> Vec<String> {
-    findings_in(Edition::Edition2024, Installs::Allowed, text)
+    findings_in(
+        Edition::Edition2024,
+        Installs::Allowed,
+        FileKind::ModRs,
+        text,
+    )
 }
 
-/// `findings` in library code that may not install a log subscriber.
-fn library_findings(text: &str) -> Vec<String> {
-    findings_in(Edition::Edition2024, Installs::Flagged, text)
+/// `findings` for a file the walk reached as `something.rs`, not `something/mod.rs`.
+fn non_mod_findings(text: &str) -> Vec<String> {
+    findings_in(
+        Edition::Edition2024,
+        Installs::Allowed,
+        FileKind::NonModRs,
+        text,
+    )
 }
 
 #[rstest]
@@ -158,6 +170,7 @@ fn parses_with_the_package_edition(#[case] edition: Edition, #[case] expected: &
         findings_in(
             edition,
             Installs::Allowed,
+            FileKind::ModRs,
             "fn f() {\n    let gen = 1;\n}\n"
         ),
         expected
@@ -184,51 +197,102 @@ fn exempting(rule: &str, text: &str) -> String {
 }
 
 #[rstest]
-#[case::rest_pattern("rest_pattern", "ATTR\nfn f(v: V) {\n    let V { a, .. } = v;\n}\n")]
-#[case::restricted_visibility("restricted_visibility", "ATTR\npub(crate) fn f() {}\n")]
-#[case::item_order("item_order", "fn f() {}\n\nATTR\nuse std::io;\n")]
-#[case::item_spacing("item_spacing", "use std::fmt;\n\nATTR\nuse std::io;\n")]
-#[case::fn_spacing("fn_spacing", "fn f() {}\nATTR\nfn g() {}\n")]
-#[case::em_dash("em_dash", "ATTR\nfn f() {\n    // a \u{2014} b\n}\n")]
-#[case::emoji("emoji", "ATTR\nfn f() {\n    // done \u{1F389}\n}\n")]
-#[case::forbidden_word("forbidden_word", "ATTR\nfn f() {\n    // see NOTES.md\n}\n")]
-#[case::forbidden_word_in_the_doc_comment("forbidden_word", "/// see NOTES.md\nATTR\nfn f() {}\n")]
-#[case::em_dash_in_the_doc_comment("em_dash", "/// a \u{2014} b\nATTR\nfn f() {}\n")]
+#[case::rest_pattern(
+    "rest_pattern",
+    FileKind::ModRs,
+    "ATTR\nfn f(v: V) {\n    let V { a, .. } = v;\n}\n"
+)]
+#[case::restricted_visibility(
+    "restricted_visibility",
+    FileKind::ModRs,
+    "ATTR\npub(crate) fn f() {}\n"
+)]
+#[case::item_order("item_order", FileKind::ModRs, "fn f() {}\n\nATTR\nuse std::io;\n")]
+#[case::item_spacing(
+    "item_spacing",
+    FileKind::ModRs,
+    "use std::fmt;\n\nATTR\nuse std::io;\n"
+)]
+#[case::fn_spacing("fn_spacing", FileKind::ModRs, "fn f() {}\nATTR\nfn g() {}\n")]
+#[case::em_dash("em_dash", FileKind::ModRs, "ATTR\nfn f() {\n    // a \u{2014} b\n}\n")]
+#[case::emoji("emoji", FileKind::ModRs, "ATTR\nfn f() {\n    // done \u{1F389}\n}\n")]
+#[case::forbidden_word(
+    "forbidden_word",
+    FileKind::ModRs,
+    "ATTR\nfn f() {\n    // see NOTES.md\n}\n"
+)]
+#[case::forbidden_word_in_the_doc_comment(
+    "forbidden_word",
+    FileKind::ModRs,
+    "/// see NOTES.md\nATTR\nfn f() {}\n"
+)]
+#[case::em_dash_in_the_doc_comment(
+    "em_dash",
+    FileKind::ModRs,
+    "/// a \u{2014} b\nATTR\nfn f() {}\n"
+)]
 #[case::forbidden_word_in_the_plain_comment_above(
     "forbidden_word",
+    FileKind::ModRs,
     "// see NOTES.md\nATTR\nfn f() {}\n"
 )]
-#[case::library_subscriber("library_subscriber", "fn f(s: S) {\n    ATTR\n    s.init();\n}\n")]
-#[case::path_attr("path_attr", "ATTR\n#[path = \"sys_unix.rs\"]\nmod sys;\n")]
+#[case::library_subscriber(
+    "library_subscriber",
+    FileKind::ModRs,
+    "fn f(s: S) {\n    ATTR\n    s.init();\n}\n"
+)]
+#[case::path_attr(
+    "path_attr",
+    FileKind::ModRs,
+    "ATTR\n#[path = \"sys_unix.rs\"]\nmod sys;\n"
+)]
 #[case::path_attr_in_a_cfg_attr(
     "path_attr",
+    FileKind::ModRs,
     "ATTR\n#[cfg_attr(unix, path = \"sys_unix.rs\")]\nmod sys;\n"
 )]
 #[case::inner_path_attr_on_its_inline_module(
     "path_attr",
+    FileKind::ModRs,
     "ATTR\nmod m {\n    #![path = \"d\"]\n    mod n;\n}\n"
 )]
-fn exemption_lifts_each_rust_source_rule(#[case] rule: &str, #[case] text: &str) {
+#[case::module_shape("module_shape", FileKind::NonModRs, "ATTR\nmod b;\n")]
+fn exemption_lifts_each_rust_source_rule(
+    #[case] rule: &str,
+    #[case] kind: FileKind,
+    #[case] text: &str,
+) {
     assert_eq!(
-        library_findings(&exempting(rule, text)),
+        findings_in(
+            Edition::Edition2024,
+            Installs::Flagged,
+            kind,
+            &exempting(rule, text)
+        ),
         Vec::<String>::new()
     );
 }
 
 #[rstest]
-#[case::rest_pattern("rest_pattern")]
-#[case::restricted_visibility("restricted_visibility")]
-#[case::item_order("item_order")]
-#[case::item_spacing("item_spacing")]
-#[case::fn_spacing("fn_spacing")]
-#[case::em_dash("em_dash")]
-#[case::emoji("emoji")]
-#[case::forbidden_word("forbidden_word")]
-#[case::library_subscriber("library_subscriber")]
-#[case::path_attr("path_attr")]
-fn exemption_matching_nothing_is_unfulfilled(#[case] rule: &str) {
+#[case::rest_pattern("rest_pattern", FileKind::ModRs)]
+#[case::restricted_visibility("restricted_visibility", FileKind::ModRs)]
+#[case::item_order("item_order", FileKind::ModRs)]
+#[case::item_spacing("item_spacing", FileKind::ModRs)]
+#[case::fn_spacing("fn_spacing", FileKind::ModRs)]
+#[case::em_dash("em_dash", FileKind::ModRs)]
+#[case::emoji("emoji", FileKind::ModRs)]
+#[case::forbidden_word("forbidden_word", FileKind::ModRs)]
+#[case::library_subscriber("library_subscriber", FileKind::ModRs)]
+#[case::path_attr("path_attr", FileKind::ModRs)]
+#[case::module_shape("module_shape", FileKind::NonModRs)]
+fn exemption_matching_nothing_is_unfulfilled(#[case] rule: &str, #[case] kind: FileKind) {
     assert_eq!(
-        library_findings(&exempting(rule, "ATTR\nfn f() {}\n")),
+        findings_in(
+            Edition::Edition2024,
+            Installs::Flagged,
+            kind,
+            &exempting(rule, "ATTR\nfn f() {}\n")
+        ),
         [format!(
             "src/lib.rs:1:1: unfulfilled_exemption: exemption for `{rule}` matches nothing here"
         )]
@@ -354,5 +418,89 @@ fn exemption_lifts_only_the_rule_it_names() {
     assert_eq!(
         findings(text),
         ["src/lib.rs:2:1: restricted_visibility: `pub(crate)` bypasses the module hierarchy"]
+    );
+}
+
+/// The check lints by the kind the walk gives it: a leaf file (`something.rs`) declaring a
+/// submodule is a `module_shape` finding; the same text as `something/mod.rs` is the
+/// required shape.
+#[test]
+fn module_shape_lints_the_kind_the_walk_reached() {
+    assert_eq!(findings("mod b;\n"), Vec::<String>::new());
+    assert_eq!(
+        non_mod_findings("mod b;\n"),
+        [
+            "src/lib.rs:1:1: module_shape: the submodule `b` makes `lib` a directory: move `lib.rs` to `lib/mod.rs`"
+        ]
+    );
+}
+
+/// The finding renders the display path, not the file's real path: this file's `shown`
+/// (`src/tests.rs`) differs from its `path` (`/elsewhere/tests.rs`).
+#[test]
+fn module_shape_shows_the_display_path_not_the_real_one() {
+    let file = TextFile {
+        path: PathBuf::from("/elsewhere/tests.rs"),
+        shown: PathBuf::from("src/tests.rs"),
+        text: "mod b;\n".to_owned(),
+    };
+    let config = Config {
+        forbidden_words: Vec::new(),
+        subscriber_crates: Vec::new(),
+    };
+    assert_eq!(
+        check(
+            &file,
+            Edition::Edition2024,
+            &config,
+            Installs::Allowed,
+            FileKind::NonModRs
+        )
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>(),
+        [
+            "src/tests.rs:1:1: module_shape: the submodule `b` makes `tests` a directory: move `tests.rs` to `tests/mod.rs`"
+        ]
+    );
+}
+
+/// A file reached through `#[path]` is `FileKind::ModRs`: no `module_shape`, but the `path`
+/// attribute itself is a `path_attr` finding.
+#[test]
+fn a_path_written_file_gets_path_attr_not_module_shape() {
+    assert_eq!(
+        findings_in(
+            Edition::Edition2024,
+            Installs::Allowed,
+            FileKind::ModRs,
+            "#[path = \"x.rs\"]\nmod x;\n"
+        ),
+        [
+            "src/lib.rs:1:3: path_attr: `path` attribute moves the module away from the file its module path names"
+        ]
+    );
+}
+
+/// A file-top inner exemption covers the whole file: every `mod x;` in it.
+#[test]
+fn file_top_inner_exemption_lifts_module_shape_for_the_whole_file() {
+    assert_eq!(
+        non_mod_findings(
+            "#![cfg_attr(samlinter, expect(module_shape, reason = \"why\"))]\nmod b;\nmod c;\n"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// An inner expect at the top of an inline module covers the out-of-line declarations in
+/// that module's body.
+#[test]
+fn inner_exemption_at_the_top_of_an_inline_module_lifts_module_shape() {
+    assert_eq!(
+        non_mod_findings(
+            "mod outer {\n    #![cfg_attr(samlinter, expect(module_shape, reason = \"why\"))]\n    mod inner;\n}\n"
+        ),
+        Vec::<String>::new()
     );
 }

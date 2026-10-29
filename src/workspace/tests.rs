@@ -131,14 +131,9 @@ fn package_files(package: &Package) -> Vec<String> {
     package
         .sources
         .iter()
-        .chain(found(&package.readme))
-        .map(|file| {
-            format!(
-                "{}: {}",
-                package.manifest.shown.display(),
-                file.shown.display()
-            )
-        })
+        .map(|source| source.file.shown.display().to_string())
+        .chain(found(&package.readme).map(|file| file.shown.display().to_string()))
+        .map(|shown| format!("{}: {}", package.manifest.shown.display(), shown))
         .collect()
 }
 
@@ -1544,14 +1539,28 @@ fn reaches(workspace: &Workspace) -> Vec<String> {
         .members
         .iter()
         .flat_map(|package| {
-            package.sources.iter().map(|file| {
-                let reach = if package.library_code.contains(&file.path) {
+            package.sources.iter().map(|source| {
+                let reach = if package.library_code.contains(&source.file.path) {
                     Reach::Library
                 } else {
                     Reach::NotLibrary
                 };
-                format!("{} {reach:?}", file.shown.display())
+                format!("{} {reach:?}", source.file.shown.display())
             })
+        })
+        .collect()
+}
+
+/// Every source of each member as `<shown> <kind>`, by the routes that reach it.
+fn shapes(workspace: &Workspace) -> Vec<String> {
+    workspace
+        .members
+        .iter()
+        .flat_map(|package| {
+            package
+                .sources
+                .iter()
+                .map(|source| format!("{} {:?}", source.file.shown.display(), source.kind))
         })
         .collect()
 }
@@ -1733,6 +1742,73 @@ fn build_script_modules_are_not_library_code() {
             "p/build.rs NotLibrary",
             "p/helper.rs NotLibrary",
             "p/src/lib.rs Library"
+        ]
+    );
+}
+
+/// - A file two routes reach keeps the kind any route gives it: a `NonModRs` route makes it
+///   `NonModRs`, so the file is linted as the `something.rs` shape that declares submodules.
+/// - A file only a `#[path]` route reaches keeps `ModRs`: the walk follows it like a
+///   `mod.rs` file, and `path_attr` already reports the attribute.
+#[rstest]
+#[case::routes_of_both_kinds_make_the_file_non_mod_rs(
+    &[
+        ("p/src/lib.rs", "mod a;\n#[path = \"a.rs\"]\nmod again;\n"),
+        ("p/src/a.rs", ""),
+    ],
+    &["p/src/a.rs NonModRs", "p/src/lib.rs ModRs"]
+)]
+#[case::a_path_route_alone_stays_mod_rs(
+    &[
+        ("p/src/lib.rs", "#[path = \"a.rs\"]\nmod a;\n"),
+        ("p/src/a.rs", ""),
+    ],
+    &["p/src/a.rs ModRs", "p/src/lib.rs ModRs"]
+)]
+#[case::bin_and_build_target_roots(
+    &[
+        ("p/src/main.rs", "mod helper;\n"),
+        ("p/src/helper.rs", ""),
+        ("p/build.rs", "mod setup;\n"),
+        ("p/setup.rs", ""),
+    ],
+    &[
+        "p/build.rs ModRs",
+        // - The roots beside their manifest sit `ModRs`, their plain children `NonModRs`.
+        "p/setup.rs NonModRs",
+        "p/src/helper.rs NonModRs",
+        "p/src/main.rs ModRs",
+    ]
+)]
+fn a_file_keeps_the_kind_of_the_routes_reaching_it(
+    #[case] files: &[(&str, &'static str)],
+    #[case] expected: &[&str],
+) {
+    let files: Vec<(&str, Content)> = files
+        .iter()
+        .map(|(path, text)| (*path, Content::Text(text)))
+        .collect();
+    assert_eq!(shapes(&load_p(&files).unwrap()), expected);
+}
+
+/// - rustc rejects a module found at both `a.rs` and `a/mod.rs`; resolution today walks and
+///   lints both files, each by the kind of its own candidate.
+/// - The run exits by its findings alone, pinned by
+///   `a_file_and_a_mod_rs_directory_exit_by_their_findings` on the CLI.
+#[test]
+fn a_file_and_a_mod_rs_directory_resolve_to_both_files() {
+    let workspace = load_p(&[
+        ("p/src/lib.rs", Content::Text("mod a;\n")),
+        ("p/src/a.rs", Content::Text("")),
+        ("p/src/a/mod.rs", Content::Text("")),
+    ])
+    .unwrap();
+    assert_eq!(
+        shapes(&workspace),
+        [
+            "p/src/a/mod.rs ModRs",
+            "p/src/a.rs NonModRs",
+            "p/src/lib.rs ModRs"
         ]
     );
 }

@@ -1,7 +1,18 @@
-use super::{ByManifest, Owned, Reach, Reached, Source};
+use super::{ByManifest, Looked, Owned, PackageMetadata, Reach, Reached, Source, SourceFile};
 use std::cmp::{self, Reverse};
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+/// A package whose sources are being cut to the ones it owns: everything `Owned` needs except
+/// the owned files themselves, which the fold over all packages fills in last.
+struct Cut {
+    metadata: PackageMetadata,
+    /// As `Reached.manifest`.
+    manifest: Looked,
+    /// As `Owned.library_code`; computed from the package's own routes before the cut.
+    library_code: BTreeSet<PathBuf>,
+}
 
 /// - Each package's reached sources cut down to the ones it owns, so a file two packages
 ///   reach, through `#[path]` say, is linted once, with its owner's edition.
@@ -21,29 +32,70 @@ pub fn owned_sources(reached: ByManifest) -> BTreeMap<PathBuf, Owned> {
         })
         .collect();
 
-    // `claimants` is in `reached`'s order, so each package pairs with its own claimant.
-    reached
-        .into_iter()
-        .zip(&claimants)
-        .map(|((manifest, package), asking)| {
-            let Reached {
+    // - One pass over every reached source of every package: each source joins the map of the
+    //   package that owns it, its kind merged with the entry there, so a `NonModRs` route of
+    //   any package makes the file `NonModRs` and the merged kind lives in one place.
+    // - The package data rides along; no package's `Owned` is final until the last source is
+    //   in, since a later package can own an earlier one's file.
+    let mut files: BTreeMap<PathBuf, BTreeMap<PathBuf, SourceFile>> = BTreeMap::new();
+    let mut cut: BTreeMap<PathBuf, Cut> = BTreeMap::new();
+    for ((manifest, package), asking) in reached.into_iter().zip(&claimants) {
+        let Reached {
+            metadata,
+            manifest: walked,
+            sources,
+        } = package;
+        let library = library_code(&sources);
+        for source in sources {
+            match files
+                .entry(owner(&claimants, &source.file.path, asking).to_path_buf())
+                .or_default()
+                .entry(source.file.path.clone())
+            {
+                Entry::Vacant(slot) => {
+                    slot.insert(SourceFile {
+                        file: source.file,
+                        kind: source.kind,
+                    });
+                }
+                Entry::Occupied(mut slot) => {
+                    slot.get_mut().kind = slot.get().kind.either(source.kind);
+                }
+            }
+        }
+        cut.insert(
+            manifest,
+            Cut {
                 metadata,
                 manifest: walked,
-                sources,
-            } = package;
-            let library_code = library_code(&sources);
-            let sources = sources
-                .into_iter()
-                .filter(|source| owner(&claimants, &source.file.path, asking) == manifest)
-                .map(|source| source.file)
-                .collect();
-            let owned = Owned {
+                library_code: library,
+            },
+        );
+    }
+
+    // - A package none of whose reached files it owns keeps no sources: an empty cut, not a
+    //   missing one.
+    cut.into_iter()
+        .map(|(manifest, cut)| {
+            let Cut {
                 metadata,
                 manifest: walked,
-                sources,
                 library_code,
-            };
-            (manifest, owned)
+            } = cut;
+            let sources = files
+                .remove(&manifest)
+                .unwrap_or_default()
+                .into_values()
+                .collect();
+            (
+                manifest,
+                Owned {
+                    metadata,
+                    manifest: walked,
+                    sources,
+                    library_code,
+                },
+            )
         })
         .collect()
 }

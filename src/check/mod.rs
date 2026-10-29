@@ -76,10 +76,15 @@ fn member_findings(package: &Package, config: &Config, gate: &Gate) -> Result<Ve
 }
 
 fn package_files(package: &Package, config: &Config, gate: &Gate) -> Vec<Finding> {
-    let sources = package
-        .sources
-        .iter()
-        .flat_map(|file| source::check(file, package.edition, config, gate.installs(&file.path)));
+    let sources = package.sources.iter().flat_map(|source| {
+        source::check(
+            &source.file,
+            package.edition,
+            config,
+            gate.installs(&source.file.path),
+            source.kind,
+        )
+    });
     sources
         .chain(readme_findings(&package.readme, config))
         .collect()

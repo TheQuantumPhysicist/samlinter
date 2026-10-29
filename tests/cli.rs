@@ -48,10 +48,15 @@ const VIOLATIONS: &[&str] = &[
 
 /// - Every file the module tree reaches, printed by its normalized path: `tests/again.rs`
 ///   reaches `src/from_tests.rs` and `src/elsewhere/q.rs` through `../`.
+/// - `src/a.rs` is reached as `a.rs` and declares `mod b;` and, inside an inline module,
+///   `mod inner;`: two `module_shape` findings; the same shape in `src/c/mod.rs` is the
+///   required one.
 /// - Files outside the tree (build output, a hidden directory, an orphan `src/orphan.rs`) hold
 ///   the same violation and stay silent.
 /// - Each `path` attribute the walk follows is itself a `path_attr` finding.
 const MODULE_TREE: &[&str] = &[
+    "src/a.rs:1:1: module_shape: the submodule `b` makes `a` a directory: move `a.rs` to `a/mod.rs`",
+    "src/a.rs:6:5: module_shape: the submodule `inner` makes `a` a directory: move `a.rs` to `a/mod.rs`",
     "src/lib.rs:3:18: path_attr: `path` attribute moves the module away from the file its module path names",
     "src/lib.rs:4:21: path_attr: `path` attribute moves the module away from the file its module path names",
     "src/lib.rs:6:3: path_attr: `path` attribute moves the module away from the file its module path names",
@@ -241,6 +246,43 @@ fn sources_are_the_files_mod_declarations_reach() {
     assert_findings(&samlinter("modules").unwrap(), MODULE_TREE);
 }
 
+/// The `module_shape` finding with its full guidance; `sources_are_the_files_mod_declarations_reach`
+/// pins the run's exit status 1.
+#[test]
+fn module_shape_findings_print_their_guidance() {
+    let stdout = String::from_utf8(samlinter("modules").unwrap().stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| line.contains(": module_shape: "))
+        .expect("the modules fixture declares a submodule in a leaf file");
+    // The finding line and the indented guidance after it, ending at the next finding.
+    // The group's findings first, the guidance once after them: a group per rule.
+    let block: Vec<&str> = lines
+        .get(start..)
+        .unwrap_or_default()
+        .iter()
+        .take_while(|line| line.starts_with(' ') || line.contains(": module_shape: "))
+        .copied()
+        .collect();
+    assert_eq!(
+        block,
+        [
+            "src/a.rs:1:1: module_shape: the submodule `b` makes `a` a directory: move `a.rs` to `a/mod.rs`",
+            "src/a.rs:6:5: module_shape: the submodule `inner` makes `a` a directory: move `a.rs` to `a/mod.rs`",
+            "  why:",
+            "    - The module tree must mirror the file system: a module with submodules is a directory, so a reader finds every module from its path.",
+            "  fix:",
+            "    - Move the file into the directory shape: `git mv something.rs something/mod.rs`, keeping the submodules where they are.",
+            "  bad fixes:",
+            "    - Do not fake the directory with `#[path = \"something/mod.rs\"]`; `path_attr` reports every `path` attribute.",
+            "    - Do not symlink the file into place; samlinter refuses symlinks.",
+            "    - Do not exempt the finding without the project owner's approval.",
+            "    - Do not add the file to `exclude` in samlinter.toml to silence a finding; `exclude` is for generated code.",
+        ]
+    );
+}
+
 #[test]
 fn path_attribute_findings_print_their_guidance() {
     let stdout = String::from_utf8(samlinter("modules").unwrap().stdout).unwrap();
@@ -323,7 +365,9 @@ fn logged_workspace(
             .unwrap_or_else(|error| eprintln!("cannot remove {}: {error}", root.display()));
     });
     for (path, text) in files {
-        fs::write(manifest.with_file_name(path), text)?;
+        let path = manifest.with_file_name(path);
+        fs::create_dir_all(path.parent().expect("every written source names a file"))?;
+        fs::write(path, text)?;
     }
     Ok((manifest, cleanup))
 }
@@ -649,6 +693,23 @@ fn excluded_files_are_not_linted() {
                 "src/generated.rs",
                 "mod gone;\npub(crate) fn f( {}\n".to_owned(),
             ),
+        ],
+    )
+    .unwrap();
+    assert_clean(&run(&[OsStr::new("--manifest-path"), manifest.as_os_str()]).unwrap());
+}
+
+/// - rustc rejects a module found at both `a.rs` and `a/mod.rs`; samlinter walks and lints
+///   both files, each by the kind of its own candidate, and the run exits by its findings
+///   alone: no error, and clean here, so empty output and exit 0.
+#[test]
+fn a_file_and_a_mod_rs_directory_exit_by_their_findings() {
+    let (manifest, _cleanup) = scratch_workspace(
+        "both_shapes",
+        vec![
+            ("src/lib.rs", "mod a;\n".to_owned()),
+            ("src/a.rs", String::new()),
+            ("src/a/mod.rs", String::new()),
         ],
     )
     .unwrap();

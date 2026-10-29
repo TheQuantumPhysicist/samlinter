@@ -452,3 +452,16 @@ fn rejects_a_path_that_is_not_a_string(#[case] text: &str, #[case] line: usize) 
         BadPath { line }
     );
 }
+
+#[rstest]
+#[case::both_mod_rs(FileKind::ModRs, FileKind::ModRs, FileKind::ModRs)]
+#[case::a_non_mod_rs_route_wins(FileKind::ModRs, FileKind::NonModRs, FileKind::NonModRs)]
+#[case::either_order(FileKind::NonModRs, FileKind::ModRs, FileKind::NonModRs)]
+#[case::both_non_mod_rs(FileKind::NonModRs, FileKind::NonModRs, FileKind::NonModRs)]
+fn two_routes_keep_the_shape_any_route_gives(
+    #[case] first: FileKind,
+    #[case] second: FileKind,
+    #[case] expected: FileKind,
+) {
+    assert_eq!(first.either(second), expected);
+}

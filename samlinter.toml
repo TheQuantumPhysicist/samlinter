@@ -5,7 +5,8 @@
 # - Exemptions live at the violation, never here:
 #   - Rust, every rule with findings in Rust source: rest_pattern, restricted_visibility,
 #     item_order, item_spacing, fn_spacing, em_dash, emoji, forbidden_word,
-#     library_subscriber, path_attr: #[cfg_attr(samlinter, expect(<rule>, reason = "<why>"))]
+#     library_subscriber, path_attr, module_shape:
+#     #[cfg_attr(samlinter, expect(<rule>, reason = "<why>"))]
 #   - Cargo.toml: [package.metadata.samlinter.expect.member_version] with <dependency> = "<why>"
 #   - Any other rule, or a listed rule in the wrong kind of file, is a malformed_exemption.
 #   - Comment findings in Cargo.toml, this file and README files cannot be exempted.

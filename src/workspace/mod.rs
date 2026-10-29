@@ -8,7 +8,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use cargo_metadata::{DependencyKind, Metadata, MetadataCommand, TargetKind};
 pub use lookup::Excluded;
 use lookup::{Disk, FileAt, Files, Looked, lexical, look, relative};
-use modules::{Candidate, Declaration, Directory, FileKind};
+pub use modules::FileKind;
+use modules::{Candidate, Declaration, Directory};
 use ownership::owned_sources;
 use ra_ap_syntax::Edition;
 use std::collections::btree_map::Entry;
@@ -50,7 +51,7 @@ pub struct Package {
     pub dependencies: Vec<Dependency>,
     /// The files this package owns among its target roots and the files their `mod`
     /// declarations reach, ordered by path.
-    pub sources: Vec<TextFile>,
+    pub sources: Vec<SourceFile>,
     /// - Every file this package reaches as library code (`Reach::Library`), by path, whichever
     ///   package owns it.
     /// - A file another package owns can still be this library's code, through `#[path]`.
@@ -60,7 +61,17 @@ pub struct Package {
 /// A Rust source file the module walk reached, and what its code is to the package's library.
 struct Source {
     file: TextFile,
+    /// The file kind of every route that reached it, merged by `FileKind::either`: a
+    /// `NonModRs` route makes it `NonModRs`.
+    kind: FileKind,
     reach: Reach,
+}
+
+/// A Rust source file the package owns, with the file kind every route to it agrees on: a
+/// `NonModRs` route (`something.rs`, not `something/mod.rs`) makes it `NonModRs`.
+pub struct SourceFile {
+    pub file: TextFile,
+    pub kind: FileKind,
 }
 
 /// Whether a source file's code can end up in its package's library.
@@ -264,7 +275,7 @@ struct Owned {
     /// As `Reached.manifest`.
     manifest: Looked,
     /// The reached source files it owns.
-    sources: Vec<TextFile>,
+    sources: Vec<SourceFile>,
     /// As `Package.library_code`.
     library_code: BTreeSet<PathBuf>,
 }
@@ -535,7 +546,7 @@ fn config(files: &impl Files, root_dir: &Path) -> Result<TextFile> {
 }
 
 /// A file several routes reach is linted once, ordered by its path, as library code when any
-/// route reaches it as such.
+/// route reaches it as such, and by the shape any route gives it.
 fn one_per_file(sources: Sources) -> Vec<Source> {
     let by_path =
         sources
@@ -548,6 +559,7 @@ fn one_per_file(sources: Sources) -> Vec<Source> {
                     Entry::Occupied(mut slot) => {
                         let kept = slot.get_mut();
                         kept.reach = kept.reach.either(source.reach);
+                        kept.kind = kept.kind.either(source.kind);
                     }
                 }
                 by_path
@@ -612,6 +624,7 @@ fn module_tree(
             )?;
             slot.insert(Source {
                 file: source,
+                kind,
                 reach,
             });
             children

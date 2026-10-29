@@ -64,6 +64,13 @@ fn exemption_covers_its_node(#[case] text: &str) {
     assert_eq!(exempted(text), Vec::<String>::new());
 }
 
+/// An exemption covers its own item, not its siblings: `g`'s violation stands, and only it.
+#[test]
+fn exemption_does_not_cover_siblings() {
+    let text = "#[cfg_attr(samlinter, expect(rest_pattern, reason = \"why\"))]\nfn f(v: V) {\n    let V { a, .. } = v;\n}\nfn g(v: V) {\n    let V { a, .. } = v;\n}\n";
+    assert_eq!(exempted(text).len(), 1);
+}
+
 #[rstest]
 #[case::missing_reason(
     "cfg_attr(samlinter, expect(rest_pattern))",

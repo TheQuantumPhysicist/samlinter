@@ -70,6 +70,10 @@ fn every_rule_explains_why_how_and_what_not_to_do() {
     Rule::MemberVersion,
     "Each dependency has one version for the whole workspace, declared in the root manifest, so an upgrade happens in one place and crates never drift onto different versions."
 )]
+#[case::module_shape(
+    Rule::ModuleShape,
+    "The module tree must mirror the file system: a module with submodules is a directory, so a reader finds every module from its path."
+)]
 #[case::panic_strategy(
     Rule::PanicStrategy,
     "A panic means an invariant broke. With unwinding, only the panicking thread or task dies while the rest of the process keeps running on state that may be half-updated."

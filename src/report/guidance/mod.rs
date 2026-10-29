@@ -56,6 +56,7 @@ impl Guidance {
             Rule::LibrarySubscriber => LIBRARY_SUBSCRIBER,
             Rule::MalformedExemption => MALFORMED_EXEMPTION,
             Rule::MemberVersion => MEMBER_VERSION,
+            Rule::ModuleShape => MODULE_SHAPE,
             Rule::PanicStrategy => PANIC_STRATEGY,
             Rule::PathAttr => PATH_ATTR,
             Rule::RestPattern => REST_PATTERN,
@@ -220,7 +221,7 @@ const LIBRARY_SUBSCRIBER: Text = Text {
 const MALFORMED_EXEMPTION: Text = Text {
     why: &[
         "An exemption must name exactly which rule it lifts and why, so a reviewer can judge it. A malformed exemption exempts nothing.",
-        "Every rule with findings in Rust source accepts an exemption on the node that holds the finding: `rest_pattern`, `restricted_visibility`, `item_order`, `item_spacing`, `fn_spacing`, `em_dash`, `emoji`, `forbidden_word`, `library_subscriber` and `path_attr`. Of the manifest rules only `member_version` does, for dependencies that by definition serve one crate. Syntax errors and the exemption rules never do, so an exemption cannot hide itself.",
+        "Every rule with findings in Rust source accepts an exemption on the node that holds the finding: `rest_pattern`, `restricted_visibility`, `item_order`, `item_spacing`, `fn_spacing`, `em_dash`, `emoji`, `forbidden_word`, `library_subscriber`, `path_attr` and `module_shape`. Of the manifest rules only `member_version` does, for dependencies that by definition serve one crate. Syntax errors and the exemption rules never do, so an exemption cannot hide itself.",
         "Comment rule findings in Cargo.toml, samlinter.toml and README files cannot be exempted: no attribute can sit there. Neither can a Rust comment that belongs to no node.",
     ],
     fix: &[
@@ -340,6 +341,19 @@ const UNFULFILLED_EXEMPTION: Text = Text {
     bad_fixes: &[
         "Do not keep it just in case.",
         "Do not widen it onto an enclosing item so it matches something else.",
+    ],
+};
+
+const MODULE_SHAPE: Text = Text {
+    why: &[
+        "The module tree must mirror the file system: a module with submodules is a directory, so a reader finds every module from its path.",
+    ],
+    fix: &[
+        "Move the file into the directory shape: `git mv something.rs something/mod.rs`, keeping the submodules where they are.",
+    ],
+    bad_fixes: &[
+        "Do not fake the directory with `#[path = \"something/mod.rs\"]`; `path_attr` reports every `path` attribute.",
+        "Do not symlink the file into place; samlinter refuses symlinks.",
     ],
 };
 

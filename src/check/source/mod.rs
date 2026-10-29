@@ -1,5 +1,6 @@
 mod exemption;
 mod layout;
+mod module_shape;
 mod path_attr;
 mod patterns;
 mod subscriber;
@@ -8,9 +9,10 @@ mod visibility;
 use super::prose::{self, Piece};
 use crate::config::Config;
 use crate::finding::{BOM, Finding, Hit, Rule, positions};
-use crate::workspace::TextFile;
+use crate::workspace::{FileKind, TextFile};
 use ra_ap_syntax::ast::CommentShape;
 use ra_ap_syntax::{AstNode, AstToken, Edition, NodeOrToken, SyntaxError, SyntaxNode, ast};
+use std::path::Path;
 pub use subscriber::{Gate, Installs};
 
 pub fn check(
@@ -18,11 +20,12 @@ pub fn check(
     edition: Edition,
     config: &Config,
     installs: Installs,
+    kind: FileKind,
 ) -> Vec<Finding> {
     let text = rustc_input(&file.text);
 
     let hits = match parse(&text, edition) {
-        Ok(tree) => lint(&tree, &text, config, installs),
+        Ok(tree) => lint(&tree, &text, config, installs, kind, &file.shown),
         Err(errors) => errors
             .iter()
             .map(|error| {
@@ -58,12 +61,20 @@ fn parse(text: &str, edition: Edition) -> Result<ast::SourceFile, Vec<SyntaxErro
     }
 }
 
-/// `text` is the source `tree` was parsed from.
-fn lint(tree: &ast::SourceFile, text: &str, config: &Config, installs: Installs) -> Vec<Hit> {
+/// `text` is the source `tree` was parsed from; `shown` is where output shows the file.
+fn lint(
+    tree: &ast::SourceFile,
+    text: &str,
+    config: &Config,
+    installs: Installs,
+    kind: FileKind,
+    shown: &Path,
+) -> Vec<Hit> {
     let root = tree.syntax();
     let hits = patterns::check(root)
         .chain(visibility::check(root))
         .chain(path_attr::check(root))
+        .chain(module_shape::check(tree, kind, shown))
         .chain(layout::check(tree))
         .chain(comment_hits(root, text, config))
         .chain(subscriber::check(root, installs))

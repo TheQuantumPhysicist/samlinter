@@ -1,5 +1,7 @@
 use super::super::lookup::Looked;
-use super::super::{ByManifest, PackageKind, PackageMetadata, Reach, Reached, Source, TextFile};
+use super::super::{
+    ByManifest, FileKind, PackageKind, PackageMetadata, Reach, Reached, Source, TextFile,
+};
 use super::{Claimant, claim, owned_sources, owner};
 use ra_ap_syntax::Edition;
 use rstest::rstest;
@@ -99,12 +101,15 @@ fn a_claim_is_the_holding_directory_depth_then_the_lower_manifest(
     );
 }
 
-/// Each package by its manifest, its owned files, then the files it reaches as library code.
-type Kept = (PathBuf, Vec<PathBuf>, Vec<PathBuf>);
+/// Each package by its manifest, its owned files with the kinds every route to them gives,
+/// then the files it reaches as library code.
+type Kept = (PathBuf, Vec<(PathBuf, FileKind)>, Vec<PathBuf>);
 
-#[test]
-fn each_package_keeps_the_files_it_owns_and_its_library_code() {
-    let package = |manifest: &str, sources: &[(&str, Reach)]| {
+/// - `owned_sources` over a shared fixture: package `/ws/a` owns `x.rs` and `y.rs`, which
+///   other packages reach too; `/ws/c` owns `owned.rs`, which `/ws/b` reaches first in
+///   manifest order; every file `/ws/e` reaches, `/ws/a` owns.
+fn kept() -> Vec<Kept> {
+    let package = |manifest: &str, sources: &[(&str, FileKind, Reach)]| {
         let metadata = PackageMetadata {
             manifest_path: PathBuf::from(manifest),
             kind: PackageKind::Library,
@@ -114,12 +119,13 @@ fn each_package_keeps_the_files_it_owns_and_its_library_code() {
         };
         let sources = sources
             .iter()
-            .map(|(path, reach)| Source {
+            .map(|(path, kind, reach)| Source {
                 file: TextFile {
                     path: PathBuf::from(path),
                     shown: PathBuf::from(path),
                     text: String::new(),
                 },
+                kind: *kind,
                 reach: *reach,
             })
             .collect();
@@ -134,23 +140,37 @@ fn each_package_keeps_the_files_it_owns_and_its_library_code() {
         package(
             "/ws/a/Cargo.toml",
             &[
-                ("/ws/a/src/lib.rs", Reach::Library),
-                ("/ws/a/src/tests.rs", Reach::NotLibrary),
-                ("/ws/a/src/x.rs", Reach::NotLibrary),
+                ("/ws/a/src/lib.rs", FileKind::ModRs, Reach::Library),
+                ("/ws/a/src/tests.rs", FileKind::NonModRs, Reach::NotLibrary),
+                ("/ws/a/src/x.rs", FileKind::NonModRs, Reach::NotLibrary),
+                ("/ws/a/src/y.rs", FileKind::ModRs, Reach::Library),
             ],
         ),
         package(
             "/ws/b/Cargo.toml",
             &[
-                ("/ws/a/src/x.rs", Reach::Library),
-                ("/ws/b/src/lib.rs", Reach::Library),
+                // `a/src/x.rs` also reached through a `#[path]` route, which gives `ModRs`.
+                ("/ws/a/src/x.rs", FileKind::ModRs, Reach::Library),
+                ("/ws/b/src/lib.rs", FileKind::ModRs, Reach::Library),
+                ("/ws/c/src/owned.rs", FileKind::NonModRs, Reach::Library),
             ],
+        ),
+        package(
+            "/ws/c/Cargo.toml",
+            &[
+                ("/ws/a/src/y.rs", FileKind::ModRs, Reach::NotLibrary),
+                ("/ws/c/src/owned.rs", FileKind::ModRs, Reach::NotLibrary),
+            ],
+        ),
+        package(
+            "/ws/e/Cargo.toml",
+            &[("/ws/a/src/y.rs", FileKind::ModRs, Reach::NotLibrary)],
         ),
     ]
     .into_iter()
     .collect();
 
-    let kept: Vec<Kept> = owned_sources(reached)
+    owned_sources(reached)
         .into_iter()
         .map(|(manifest, package)| {
             (
@@ -158,25 +178,56 @@ fn each_package_keeps_the_files_it_owns_and_its_library_code() {
                 package
                     .sources
                     .into_iter()
-                    .map(|source| source.path)
+                    .map(|source| (source.file.path, source.kind))
                     .collect(),
                 package.library_code.into_iter().collect(),
             )
         })
-        .collect();
+        .collect()
+}
+
+#[test]
+fn each_package_keeps_the_files_it_owns_and_its_library_code() {
     let paths = |paths: &[&str]| paths.iter().map(PathBuf::from).collect::<Vec<_>>();
+    let owned = |files: &[(&str, FileKind)]| {
+        files
+            .iter()
+            .map(|(path, kind)| (PathBuf::from(path), *kind))
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        kept,
+        kept(),
         [
             (
                 PathBuf::from("/ws/a/Cargo.toml"),
-                paths(&["/ws/a/src/lib.rs", "/ws/a/src/tests.rs", "/ws/a/src/x.rs"]),
-                paths(&["/ws/a/src/lib.rs"]),
+                owned(&[
+                    ("/ws/a/src/lib.rs", FileKind::ModRs),
+                    ("/ws/a/src/tests.rs", FileKind::NonModRs),
+                    // A `NonModRs` route of any package makes it `NonModRs`.
+                    ("/ws/a/src/x.rs", FileKind::NonModRs),
+                    ("/ws/a/src/y.rs", FileKind::ModRs),
+                ]),
+                paths(&["/ws/a/src/lib.rs", "/ws/a/src/y.rs"]),
             ),
             (
                 PathBuf::from("/ws/b/Cargo.toml"),
-                paths(&["/ws/b/src/lib.rs"]),
-                paths(&["/ws/a/src/x.rs", "/ws/b/src/lib.rs"]),
+                owned(&[("/ws/b/src/lib.rs", FileKind::ModRs)]),
+                paths(&["/ws/a/src/x.rs", "/ws/b/src/lib.rs", "/ws/c/src/owned.rs"]),
+            ),
+            (
+                // - `/ws/c` sorts after `/ws/b`, which also reaches `owned.rs`: the owner wins
+                //   even though the fold meets the reacher first, and a `NonModRs` route of
+                //   any package still makes it `NonModRs`.
+                PathBuf::from("/ws/c/Cargo.toml"),
+                owned(&[("/ws/c/src/owned.rs", FileKind::NonModRs)]),
+                paths(&[]),
+            ),
+            (
+                // - Every file this package reaches, a stronger claimant owns: its cut keeps
+                //   no files, and it is still there, linted for its manifest and README.
+                PathBuf::from("/ws/e/Cargo.toml"),
+                Vec::new(),
+                paths(&[]),
             ),
         ]
     );
