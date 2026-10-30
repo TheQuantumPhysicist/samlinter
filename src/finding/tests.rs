@@ -65,6 +65,10 @@ fn finding_renders_path_position_rule_message(#[case] span: Span, #[case] expect
     "member_version",
     Ok(Exemptability::Manifest(ManifestExemptable::MemberVersion))
 )]
+#[case::feature_flags(
+    "feature_flags",
+    Ok(Exemptability::Manifest(ManifestExemptable::FeatureFlags))
+)]
 #[case::module_shape(
     "module_shape",
     Ok(Exemptability::Source(SourceExemptable(Rule::ModuleShape)))
@@ -91,7 +95,7 @@ fn exempted_in(rule: Rule) -> &'static str {
 #[case::binary_readme(Rule::BinaryReadme, "nowhere")]
 #[case::em_dash(Rule::EmDash, "rust")]
 #[case::emoji(Rule::Emoji, "rust")]
-#[case::feature_flags(Rule::FeatureFlags, "nowhere")]
+#[case::feature_flags(Rule::FeatureFlags, "cargo.toml")]
 #[case::fn_spacing(Rule::FnSpacing, "rust")]
 #[case::forbidden_word(Rule::ForbiddenWord, "rust")]
 #[case::item_order(Rule::ItemOrder, "rust")]

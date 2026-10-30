@@ -3,7 +3,9 @@ use super::{FixedRule, Kind, Violation, entries};
 use crate::finding::{Exemptability, ManifestExemptable, Rule};
 use toml_edit::{Item, Key, Table};
 
-/// An entry of `[package.metadata.samlinter.expect.<rule>]`: dependency name -> reason.
+/// An entry of `[package.metadata.samlinter.expect.<rule>]`: the name the violation sits at
+/// (a dependency for `member_version`; the `[features]` table or the optional dependency's
+/// name for `feature_flags`) -> reason.
 struct Exemption<'a> {
     rule: ManifestExemptable,
     key: &'a Key,

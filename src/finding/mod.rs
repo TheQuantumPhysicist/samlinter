@@ -53,7 +53,7 @@ impl Rule {
     /// - Every rule with findings in Rust source is exempted there, by an attribute.
     /// - Comment rules also report in Cargo.toml, samlinter.toml and README files, where no
     ///   attribute can sit, so those findings stay.
-    /// - Of the manifest rules only `member_version` has an exception clause.
+    /// - Of the manifest rules, `member_version` and `feature_flags` have an exception clause.
     /// - Syntax errors and exemption bookkeeping never are, so an exemption cannot hide itself.
     pub const fn exemptability(self) -> Exemptability {
         match self {
@@ -69,8 +69,8 @@ impl Rule {
             | Self::RestPattern
             | Self::RestrictedVisibility => Exemptability::Source(SourceExemptable(self)),
             Self::MemberVersion => Exemptability::Manifest(ManifestExemptable::MemberVersion),
+            Self::FeatureFlags => Exemptability::Manifest(ManifestExemptable::FeatureFlags),
             Self::BinaryReadme
-            | Self::FeatureFlags
             | Self::MalformedExemption
             | Self::PanicStrategy
             | Self::SyntaxError
@@ -114,12 +114,14 @@ impl From<SourceExemptable> for Rule {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManifestExemptable {
     MemberVersion,
+    FeatureFlags,
 }
 
 impl From<ManifestExemptable> for Rule {
     fn from(rule: ManifestExemptable) -> Self {
         match rule {
             ManifestExemptable::MemberVersion => Self::MemberVersion,
+            ManifestExemptable::FeatureFlags => Self::FeatureFlags,
         }
     }
 }

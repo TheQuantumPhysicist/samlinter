@@ -42,6 +42,26 @@ fn exempted(text: &str) -> Vec<Finding> {
     "[features]\nfast = []\n\n[package.metadata.samlinter.expect.member_version]\nrand = \"why\"\n",
     &["1:2 feature_flags", "5:1 unfulfilled_exemption"]
 )]
+#[case::the_features_table(
+    "[features]\nfast = []\n\n[package.metadata.samlinter.expect.feature_flags]\nfeatures = \"why\"\n",
+    &[]
+)]
+#[case::an_optional_dependency(
+    "[dependencies]\nserde = { workspace = true, optional = true }\n\n[package.metadata.samlinter.expect.feature_flags]\nserde = \"why\"\n",
+    &[]
+)]
+#[case::optional_dependency_in_table_form(
+    "[dependencies.serde]\nworkspace = true\noptional = true\n\n[package.metadata.samlinter.expect.feature_flags]\nserde = \"why\"\n",
+    &[]
+)]
+#[case::optional_dependency_in_a_target_section(
+    "[target.'cfg(unix)'.build-dependencies]\ncc = { workspace = true, optional = true }\n\n[package.metadata.samlinter.expect.feature_flags]\ncc = \"why\"\n",
+    &[]
+)]
+#[case::feature_flags_other_name(
+    "[features]\nfast = []\n\n[package.metadata.samlinter.expect.feature_flags]\nx = \"why\"\n",
+    &["1:2 feature_flags", "5:1 unfulfilled_exemption"]
+)]
 #[case::no_exemptions(
     "[package]\nname = \"a\"\n\n[dependencies]\nrand = \"0.10\"\n",
     &["5:1 member_version"]
@@ -61,6 +81,17 @@ fn malformed_exemption_exempts_nothing(#[case] exemption: &str) {
     assert_eq!(
         render(&exempted(&text)),
         ["2:1 member_version", "5:1 malformed_exemption"]
+    );
+}
+
+#[rstest]
+#[case::empty_reason("[package.metadata.samlinter.expect.feature_flags]\nfeatures = \" \"\n")]
+#[case::reason_not_a_string("[package.metadata.samlinter.expect.feature_flags]\nfeatures = 1\n")]
+fn feature_flags_malformed_reason_exempts_nothing(#[case] exemption: &str) {
+    let text = format!("[features]\nfast = []\n\n{exemption}");
+    assert_eq!(
+        render(&exempted(&text)),
+        ["1:2 feature_flags", "5:1 malformed_exemption"]
     );
 }
 
@@ -89,13 +120,17 @@ fn malformed_exemption_exempts_nothing(#[case] exemption: &str) {
     "[package.metadata.samlinter.expect.member_version]\nrand = \" \"\n",
     "2:1 the reason must be a non-empty string saying why"
 )]
+#[case::feature_flags_reason_not_a_string(
+    "[package.metadata.samlinter.expect.feature_flags]\nfeatures = 1\n",
+    "2:1 the reason must be a non-empty string saying why"
+)]
+#[case::feature_flags_empty_reason(
+    "[package.metadata.samlinter.expect.feature_flags]\nfeatures = \" \"\n",
+    "2:1 the reason must be a non-empty string saying why"
+)]
 #[case::unknown_rule(
     "[package.metadata.samlinter.expect.no_such_rule]\nx = \"why\"\n",
     "1:36 unknown rule `no_such_rule`"
-)]
-#[case::rule_without_exception_clause(
-    "[package.metadata.samlinter.expect.feature_flags]\nx = \"why\"\n",
-    "1:36 rule `feature_flags` cannot be exempted"
 )]
 #[case::rule_exempted_in_rust_source(
     "[package.metadata.samlinter.expect.rest_pattern]\nx = \"why\"\n",
@@ -104,6 +139,10 @@ fn malformed_exemption_exempts_nothing(#[case] exemption: &str) {
 #[case::comment_rule(
     "[package.metadata.samlinter.expect.em_dash]\nx = \"why\"\n",
     "1:36 rule `em_dash` is exempted in Rust source, not in Cargo.toml"
+)]
+#[case::unexemptable_rule(
+    "[package.metadata.samlinter.expect.panic_strategy]\nx = \"why\"\n",
+    "1:36 rule `panic_strategy` cannot be exempted"
 )]
 fn malformed_exemption_says_what_is_wrong(#[case] text: &str, #[case] expected: &str) {
     let messages: Vec<String> = exempted(text)

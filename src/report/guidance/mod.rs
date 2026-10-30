@@ -140,6 +140,7 @@ const FEATURE_FLAGS: Text = Text {
     fix: &[
         "Delete the `[features]` table and every `optional = true`, and pick one behavior: always compile the code, or move the optional part into its own crate that users depend on explicitly.",
         "Enabling a feature of a dependency, as in `dep = { workspace = true, features = [\"x\"] }`, is fine: it is not a feature flag of this crate.",
+        "The sanctioned escape for a feature that only exposes this crate's test helpers to sibling test crates, gated with `#[cfg(any(test, feature = \"<name>\"))]` at every use, is an exemption in Cargo.toml: `[package.metadata.samlinter.expect.feature_flags]` with `features = \"<why>\"`.",
     ],
     bad_fixes: &[
         "Do not rebuild the switch from custom `cfg` flags, environment variables or build-script logic; that is the same extra dimension under another name.",
@@ -207,9 +208,9 @@ const LIBRARY_SUBSCRIBER: Text = Text {
     ],
     fix: &[
         "In the library, only emit log events, for example with `tracing` or `log` macros. Building layers or subscribers for a binary to install is fine.",
-        "Install the subscriber (`init`, `try_init`, `set_global_default`, `set_default`) only in each binary's `main`.",
+        "Install the subscriber (`init`, `try_init`, `set_global_default`) only in each binary's `main`.",
         "Tests may install one: in a test function (an attribute whose path ends in `test`, such as `#[test]` or `#[tokio::test]`), under a cfg that requires `test`, in a file only test-only `mod` declarations or `cfg_attr(test, path = ..)` paths reach, or in a test, bench or example target or the build script.",
-        "samlinter has no type information, so in such a library any `.init()` or `.try_init()` method call counts, and any function call whose last path segment is `init`, `try_init`, `set_global_default` or `set_default`, such as the library's own `init()` or `Config::set_default()`. If one is not a subscriber install, rename it or exempt the site with the project owner's approval.",
+        "samlinter has no type information, so in such a library any `.init()` or `.try_init()` method call counts, and any function call whose last path segment is `init`, `try_init` or `set_global_default`, such as the library's own `init()`. If one is not a subscriber install, rename it or exempt the site with the project owner's approval.",
     ],
     bad_fixes: &[
         "Do not hide the install call in a macro or behind a function pointer to dodge the name match.",
@@ -221,13 +222,14 @@ const LIBRARY_SUBSCRIBER: Text = Text {
 const MALFORMED_EXEMPTION: Text = Text {
     why: &[
         "An exemption must name exactly which rule it lifts and why, so a reviewer can judge it. A malformed exemption exempts nothing.",
-        "Every rule with findings in Rust source accepts an exemption on the node that holds the finding: `rest_pattern`, `restricted_visibility`, `item_order`, `item_spacing`, `fn_spacing`, `em_dash`, `emoji`, `forbidden_word`, `library_subscriber`, `path_attr` and `module_shape`. Of the manifest rules only `member_version` does, for dependencies that by definition serve one crate. Syntax errors and the exemption rules never do, so an exemption cannot hide itself.",
+        "Every rule with findings in Rust source accepts an exemption on the node that holds the finding: `rest_pattern`, `restricted_visibility`, `item_order`, `item_spacing`, `fn_spacing`, `em_dash`, `emoji`, `forbidden_word`, `library_subscriber`, `path_attr` and `module_shape`. Of the manifest rules, `member_version` (keyed by dependency) and `feature_flags` (keyed by the `[features]` table or an optional dependency's name) do. Syntax errors and the exemption rules never do, so an exemption cannot hide itself.",
         "Comment rule findings in Cargo.toml, samlinter.toml and README files cannot be exempted: no attribute can sit there. Neither can a Rust comment that belongs to no node.",
     ],
     fix: &[
         "Exempt a Rust source rule in Rust only: write `#[cfg_attr(samlinter, expect(<rule>, reason = \"<why>\"))]` on the item, field, match arm, statement or parameter that holds the violation. It covers that node's own text; an item or a field also owns its doc comments and the plain comments directly above it. A plain comment above a `let` statement, a match arm or a parameter is outside the node. A file's `//!` docs, a comment a blank line apart from the next item and comments after the last item belong to no node and cannot be exempted: rewrite them. An exemption is an outer `#[...]` on the node it covers, or an inner `#![...]` at the top of a file or inline module; in a function body it covers nothing and is malformed.",
         "Rust accepts no attribute on an assignment: exempt a destructuring assignment such as `(a, ..) = t;` on a block around it or on the enclosing function.",
         "Exempt `member_version` in the member's Cargo.toml only: write `[package.metadata.samlinter.expect.member_version]` with `<dependency> = \"<why>\"`.",
+        "Exempt `feature_flags` in any package manifest, the root package's included (a virtual root has no `[package]` table): write `[package.metadata.samlinter.expect.feature_flags]` with `features = \"<why>\"` for the `[features]` table, or with the optional dependency's name for a dependency with `optional = true`.",
         "If the rule accepts no exemption, delete the exemption and fix the code.",
     ],
     bad_fixes: &[

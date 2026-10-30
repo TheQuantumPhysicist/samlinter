@@ -67,15 +67,15 @@ fn virtual_root(text: &str) -> Vec<String> {
 #[case::feature_table("[package]\nname = \"a\"\n\n[features]\nfast = []\n", &["4:2 feature_flags"])]
 #[case::optional_dependency(
     "[dependencies]\nserde = { workspace = true, optional = true }\n",
-    &["2:29 feature_flags"]
+    &["2:1 feature_flags"]
 )]
 #[case::optional_dependency_table(
     "[dependencies.serde]\nworkspace = true\noptional = true\n",
-    &["3:1 feature_flags", "1:15 workspace_dependency_form"]
+    &["1:15 feature_flags", "1:15 workspace_dependency_form"]
 )]
 #[case::optional_target_build_dependency(
     "[target.'cfg(unix)'.build-dependencies]\ncc = { workspace = true, optional = true }\n",
-    &["2:26 feature_flags"]
+    &["2:1 feature_flags"]
 )]
 #[case::required_dependency(
     "[dependencies]\nserde = { workspace = true, optional = false }\n",
@@ -267,7 +267,7 @@ fn root_package_may_hold_versions() {
 )]
 #[case::optional_dependency(
     "\n[dependencies]\nserde = { workspace = true, optional = true }\n",
-    &["8:29 feature_flags"]
+    &["8:1 feature_flags"]
 )]
 fn root_package_gets_the_rules_of_every_manifest(#[case] tail: &str, #[case] expected: &[&str]) {
     let text = format!("{PROFILES}{tail}");
@@ -295,6 +295,26 @@ fn member_version_exemption_names_the_dependency(#[case] text: &str, #[case] exp
     assert_eq!(library_member(text), expected);
 }
 
+#[rstest]
+#[case::the_features_table(
+    "[features]\nfast = []\n\n[package.metadata.samlinter.expect.feature_flags]\nfeatures = \"why\"\n",
+    &[]
+)]
+#[case::an_optional_dependency(
+    "[dependencies]\nserde = { workspace = true, optional = true }\n\n[package.metadata.samlinter.expect.feature_flags]\nserde = \"why\"\n",
+    &[]
+)]
+#[case::other_name(
+    "[features]\nfast = []\n\n[package.metadata.samlinter.expect.feature_flags]\nx = \"why\"\n",
+    &["1:2 feature_flags", "5:1 unfulfilled_exemption"]
+)]
+fn feature_flags_exemption_names_the_table_or_the_optional_dependency(
+    #[case] text: &str,
+    #[case] expected: &[&str],
+) {
+    assert_eq!(library_member(text), expected);
+}
+
 /// No attribute can sit in a manifest comment, so its comment findings stay.
 #[test]
 fn comment_rule_exemption_in_a_manifest_is_malformed_and_lifts_nothing() {
@@ -316,12 +336,38 @@ fn member_version_exemption_on_the_root_package_is_unfulfilled() {
     );
 }
 
+/// `feature_flags` runs on the root package too, so its exemption lifts there as well; a
+/// virtual root has no `[package]` table, so it has nothing to write the exemption in.
+#[rstest]
+#[case::the_features_table(
+    "\n[features]\nfast = []\n\n[package.metadata.samlinter.expect.feature_flags]\nfeatures = \"why\"\n"
+)]
+#[case::an_optional_dependency(
+    "\n[dependencies]\nserde = { workspace = true, optional = true }\n\n[package.metadata.samlinter.expect.feature_flags]\nserde = \"why\"\n"
+)]
+fn feature_flags_exemption_on_the_root_package_lifts(#[case] tail: &str) {
+    let text = format!("{PROFILES}{tail}");
+    let package = package(&text, PackageKind::Binary, README, Vec::new());
+    assert_eq!(
+        render(&check(&Role::RootPackage(&package), &config()).unwrap()),
+        Vec::<String>::new()
+    );
+}
+
+/// The README and the config template claim it: a virtual root's `[features]` table flags, and
+/// with no `[package]` table no exemption can be written for it.
+#[test]
+fn virtual_root_features_table_flags() {
+    let text = format!("{PROFILES}\n[features]\nfast = []\n");
+    assert_eq!(virtual_root(&text), ["7:2 feature_flags"]);
+}
+
 /// `toml_edit` gives every parsed key a position, dotted and header keys included, so only a key
 /// built by hand reaches this error.
 #[test]
 fn key_without_a_position_stops_the_run() {
     let key = Key::new("serde");
-    let error = Violation::at_key(&key, FixedRule::FeatureFlags, "message")
+    let error = Violation::at_key(&key, FixedRule::PanicStrategy, "message")
         .into_finding(&text_file("Cargo.toml", ""))
         .unwrap_err();
     assert_eq!(

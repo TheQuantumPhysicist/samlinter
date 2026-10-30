@@ -104,9 +104,9 @@ fn exemption_does_not_cover_siblings() {
     "cfg_attr(samlinter, expect(unfulfilled_exemption, reason = \"why\"))",
     "rule `unfulfilled_exemption` cannot be exempted"
 )]
-#[case::manifest_rule_without_exception_clause(
+#[case::manifest_rule_exempted_in_cargo_toml(
     "cfg_attr(samlinter, expect(feature_flags, reason = \"why\"))",
-    "rule `feature_flags` cannot be exempted"
+    "rule `feature_flags` is exempted in Cargo.toml, not in Rust source"
 )]
 #[case::rule_exempted_in_cargo_toml(
     "cfg_attr(samlinter, expect(member_version, reason = \"why\"))",

@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 const METHODS: [&str; 2] = ["init", "try_init"];
 
 /// Last path segments of functions that install one, as in `fmt::init()`.
-const FUNCTIONS: [&str; 4] = ["init", "try_init", "set_global_default", "set_default"];
+/// - `set_default` is missing on purpose: it is scoped, returning a `DefaultGuard` that
+///   resets on drop, so it installs nothing globally.
+const FUNCTIONS: [&str; 3] = ["init", "try_init", "set_global_default"];
 
 /// Whether a file's calls that install a log subscriber are findings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

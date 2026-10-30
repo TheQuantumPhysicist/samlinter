@@ -48,7 +48,6 @@ enum Location<'a> {
 #[derive(Clone, Copy, strum::EnumIter)]
 enum FixedRule {
     BinaryReadme,
-    FeatureFlags,
     MalformedExemption,
     PanicStrategy,
     SyntaxError,
@@ -60,7 +59,6 @@ impl From<FixedRule> for Rule {
     fn from(rule: FixedRule) -> Self {
         match rule {
             FixedRule::BinaryReadme => Self::BinaryReadme,
-            FixedRule::FeatureFlags => Self::FeatureFlags,
             FixedRule::MalformedExemption => Self::MalformedExemption,
             FixedRule::PanicStrategy => Self::PanicStrategy,
             FixedRule::SyntaxError => Self::SyntaxError,
@@ -78,7 +76,8 @@ enum Kind<'a> {
         rule: FixedRule,
         location: Location<'a>,
     },
-    /// Exemptions name the dependency, so the violation sits at its key.
+    /// Exemptions name what the violation sits at (a dependency, or the `[features]`
+    /// table), so the violation sits at that key.
     Exemptable {
         rule: ManifestExemptable,
         key: &'a Key,
@@ -253,9 +252,13 @@ fn lint<'a>(root: &'a Table, role: &Role) -> Vec<Violation<'a>> {
 }
 
 fn feature_flags(root: &Table) -> Vec<Violation<'_>> {
-    let table = root
-        .key("features")
-        .map(|key| Violation::at_key(key, FixedRule::FeatureFlags, "`[features]` table"));
+    let table = root.key("features").map(|key| Violation {
+        kind: Kind::Exemptable {
+            rule: ManifestExemptable::FeatureFlags,
+            key,
+        },
+        message: "`[features]` table".to_owned(),
+    });
     table
         .into_iter()
         .chain(optional_dependencies(root))
@@ -267,13 +270,13 @@ fn optional_dependencies(root: &Table) -> Vec<Violation<'_>> {
     dependencies(root)
         .into_iter()
         .filter_map(|entry| {
-            let (key, value) = entry.declaration.fields()?.get_key_value("optional")?;
-            (value.as_bool() == Some(true)).then(|| {
-                Violation::at_key(
-                    key,
-                    FixedRule::FeatureFlags,
-                    format!("optional dependency `{}` is a feature flag", entry.name()),
-                )
+            let optional = entry.declaration.fields()?.get("optional")?;
+            (optional.as_bool() == Some(true)).then(|| Violation {
+                kind: Kind::Exemptable {
+                    rule: ManifestExemptable::FeatureFlags,
+                    key: entry.key,
+                },
+                message: format!("optional dependency `{}` is a feature flag", entry.name()),
             })
         })
         .collect()

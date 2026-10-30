@@ -147,7 +147,7 @@ Rust sources are found the way the compiler finds them, not by listing directori
 - `library_subscriber`: flags, in the library code of a package without a binary target that
   lists a configured subscriber crate as a regular dependency, each `.init()` and
   `.try_init()` method call and each function call whose last path segment is `init`,
-  `try_init`, `set_global_default` or `set_default`, at that name.
+  `try_init` or `set_global_default`, at that name.
 - `library_subscriber`: the dependency, renamed or not, target-specific or not, only turns the
   check on; dev and build dependencies do not. Building layers or subscribers is fine.
 - `library_subscriber`: library code is what a library target reaches through `mod`
@@ -161,7 +161,7 @@ Rust sources are found the way the compiler finds them, not by listing directori
   (`#[cfg(test)] mod tests;` leads to `tests.rs` and everything below it), and the test,
   bench, example and build script targets.
 - `library_subscriber`: matched by name, with no type information, so any call so named
-  counts, such as the library's own `init()` or `Config::set_default()`; a call inside a
+  counts, such as the library's own `init()` or `Config::init()`; a call inside a
   macro body is not seen.
 - `path_attr`: `#[path]` overrides the file-name-to-module mapping, so the module tree stops
   mirroring the file system.
@@ -215,8 +215,8 @@ Always on:
 - `syntax_error`: a file that does not parse is reported, never half-linted.
 - `malformed_exemption` and `unfulfilled_exemption`: see Exemptions.
 
-Limits: no type information, so `library_subscriber` flags any call named `init`, `try_init`,
-`set_global_default` or `set_default` in such a library. Macro bodies are token trees: only
+Limits: no type information, so `library_subscriber` flags any call named `init`, `try_init`
+or `set_global_default` in such a library. Macro bodies are token trees: only
 the comment rules look inside them. Nesting is tested to 5000 levels of parentheses and
 inline modules, and to 20000 inline modules in a file with a syntax error; deeper or other
 nesting may abort with a stack overflow.
@@ -272,6 +272,9 @@ Every exemption needs a reason, and is written in the kind of file its findings 
   `library_subscriber`, `path_attr` and `module_shape`, on the node that holds the finding. A comment that belongs to no node
   cannot be exempted (see below).
 - A member `Cargo.toml`: `member_version`.
+- A package `Cargo.toml`, a member's or the root package's: `feature_flags`. A virtual root
+  has no `[package]` table to write the exemption in, so its `[features]` table, if any,
+  cannot be exempted.
 - Nowhere: `syntax_error`, `malformed_exemption`, `unfulfilled_exemption` and the other
   Cargo.toml rules. Comment findings in `Cargo.toml`, `samlinter.toml` and README files
   cannot be exempted either: no attribute can sit there.
@@ -306,11 +309,16 @@ let vendor::Config { timeout, .. } = config;
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(samlinter)"] }
 ```
 
-In a member `Cargo.toml`, an exemption names the dependency:
+In a member's `Cargo.toml`, a `member_version` exemption names the dependency; a
+`feature_flags` exemption, in a member's or the root package's, names the `[features]` table
+or the optional dependency:
 
 ```toml
 [package.metadata.samlinter.expect.member_version]
 rand = "rand serves only this crate's business case"
+
+[package.metadata.samlinter.expect.feature_flags]
+features = "the feature only exposes this crate's test helpers, gated as cfg(any(test, feature = ..))"
 ```
 
 An exemption that matches nothing is itself a finding, so stale exemptions cannot pile up.

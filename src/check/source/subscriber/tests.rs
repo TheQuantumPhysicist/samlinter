@@ -28,7 +28,11 @@ fn flagged(text: &str) -> Vec<String> {
     "fn f(s: S) {\n    tracing::subscriber::set_global_default(s);\n}\n",
     &["2:26 library_subscriber"]
 )]
-#[case::set_default("fn f(s: S) {\n    let _g = set_default(s);\n}\n", &["2:14 library_subscriber"])]
+#[case::set_default_function_is_no_install("fn f(s: S) {\n    let _g = set_default(s);\n}\n", &[])]
+#[case::set_default_via_path_is_no_install(
+    "fn f(s: S) {\n    tracing::subscriber::set_default(s);\n}\n",
+    &[]
+)]
 #[case::generic_function(
     "fn f(s: S) {\n    set_global_default::<S>(s);\n}\n",
     &["2:5 library_subscriber"]
@@ -97,8 +101,8 @@ fn flags_calls_that_install_a_subscriber(#[case] text: &str, #[case] expected: &
     "library installs a log subscriber: `tracing::subscriber::set_global_default()`"
 )]
 #[case::path_with_a_comment(
-    "fn f(s: S) {\n    tracing::subscriber:: /* c */ set_default(s);\n}\n",
-    "library installs a log subscriber: `tracing::subscriber::set_default()`"
+    "fn f(s: S) {\n    tracing::subscriber:: /* c */ set_global_default(s);\n}\n",
+    "library installs a log subscriber: `tracing::subscriber::set_global_default()`"
 )]
 #[case::generic_arguments(
     "fn f(s: S) {\n    subscriber::set_global_default::<S>(s);\n}\n",
