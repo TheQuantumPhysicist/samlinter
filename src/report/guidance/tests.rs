@@ -60,7 +60,7 @@ fn every_rule_explains_why_how_and_what_not_to_do() {
 )]
 #[case::forbidden_word(
     Rule::ForbiddenWord,
-    "The project lists this word or phrase under `forbidden-words` in samlinter.toml because it must not appear in comments or README files."
+    "The project lists this word or phrase under `forbidden-words` or `forbidden-words-insensitive` in samlinter.toml because it must not appear in comments or README files."
 )]
 #[case::item_order(
     Rule::ItemOrder,

@@ -1,13 +1,13 @@
 use super::super::{render, text_file};
 use super::check;
-use crate::config::words;
+use crate::config::forbidden_words;
 use rstest::rstest;
 
 /// Each finding in `text` as `line:column rule`, with `NOTES.md` and a phrase forbidden.
 fn comments(text: &str) -> Vec<String> {
     render(&check(
         &text_file("Cargo.toml", text),
-        &words(&["NOTES.md", "it is worth noting"]),
+        &forbidden_words(&["NOTES.md", "it is worth noting"], &[]),
     ))
 }
 

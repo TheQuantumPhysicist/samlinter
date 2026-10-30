@@ -1,5 +1,5 @@
 use super::prose::{self, Piece};
-use crate::config::Word;
+use crate::config::ForbiddenWord;
 use crate::finding::Finding;
 use crate::workspace::TextFile;
 use toml_parser::lexer::{Token, TokenKind};
@@ -11,7 +11,7 @@ use toml_parser::{Source, Span};
 /// - Em-dashes and emoji are found in each comment, `#` included.
 /// - Forbidden words are found in each run of comments on consecutive lines read as one
 ///   text, `#` markers dropped, so a phrase wrapped onto the next comment line still matches.
-pub fn check(file: &TextFile, forbidden_words: &[Word]) -> Vec<Finding> {
+pub fn check(file: &TextFile, forbidden_words: &[ForbiddenWord]) -> Vec<Finding> {
     let text = &file.text;
     let comments: Vec<Span> = Source::new(text)
         .lex()

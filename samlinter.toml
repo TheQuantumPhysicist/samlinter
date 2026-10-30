@@ -17,13 +17,18 @@
 #   - Comment findings in Cargo.toml, this file and README files cannot be exempted.
 
 # - Words or phrases banned in comments (Rust, Cargo.toml, this file) and README files.
-# - Case-sensitive, whole words only: "NOTES" does not match "KEYNOTES".
+# - `forbidden-words` matches case-sensitively as whole words: "NOTES" does not match
+#   "KEYNOTES". Proper nouns and file names are listed here, in their exact case.
+# - `forbidden-words-insensitive` matches case-insensitively as whole words: any casing
+#   fires, a sentence start included. Spellings that must stay American are listed here.
 # - The words of a phrase match across any whitespace run, so a phrase wrapped across
 #   lines or consecutive comment lines still matches.
 forbidden-words = [
     "RULES.md", "CODEMAP.md", "AGENTS.md", "HANDOFF.md", "TRACKS.md", "INVARIANTS.md",
     "DESIGN.md", "CLAUDE.md",
     "Claude", "Anthropic", "OpenAI", "ChatGPT", "GPT", "Copilot", "AI", "LLM", "LLMs",
+]
+forbidden-words-insensitive = [
     "behaviour", "behavioural", "initialise", "initialised", "initialising",
     "colour", "colourful", "favour", "favourable", "labour", "honour",
     "analyse", "analysed", "analysing", "optimise", "optimised", "optimising",

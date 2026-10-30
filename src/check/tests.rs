@@ -1,5 +1,5 @@
 use super::{PROFILES, run, text_file};
-use crate::config::{Config, words};
+use crate::config::{Config, forbidden_words, words};
 use crate::workspace::{
     Dependency, Excluded, FileKind, Package, PackageKind, Readme, Root, Section, SourceFile,
     TextFile, Workspace,
@@ -74,7 +74,7 @@ fn workspace(edition: Edition, source: &str) -> Workspace {
 
 fn config() -> Config {
     Config {
-        forbidden_words: words(&["NOTES.md"]),
+        forbidden_words: forbidden_words(&["NOTES.md"], &[]),
         subscriber_crates: Vec::new(),
     }
 }
@@ -160,7 +160,7 @@ fn config_comments_are_checked_for_prose() {
     let workspace = Workspace {
         config: text_file(
             "samlinter.toml",
-            "# See NOTES.md\nforbidden-words = [\"NOTES.md\"]\nsubscriber-crates = []\n",
+            "# See NOTES.md\nforbidden-words = [\"NOTES.md\"]\nforbidden-words-insensitive = []\nsubscriber-crates = []\n",
         ),
         ..workspace(Edition::Edition2024, "")
     };

@@ -209,10 +209,10 @@ const FN_SPACING: Text = Text {
 
 const FORBIDDEN_WORD: Text = Text {
     why: &[
-        "The project lists this word or phrase under `forbidden-words` in samlinter.toml because it must not appear in comments or README files.",
+        "The project lists this word or phrase under `forbidden-words` or `forbidden-words-insensitive` in samlinter.toml because it must not appear in comments or README files.",
         "Typical entries name documents that readers of the code do not have, refer to the tools used to write the code, or are filler phrases. A comment that points at a document nobody else can open explains nothing.",
-        "Some entries enforce a language rule of the project, such as spelling that must stay American.",
-        "Matching is exact-case: an entry only fires on text of its own case, so a capitalized sentence start escapes a lowercase entry.",
+        "Some entries enforce a language rule of the project, such as spelling that must stay American; those are listed under `forbidden-words-insensitive`.",
+        "An entry under `forbidden-words` matches only text of its own case, so a capitalized sentence start escapes a lowercase entry. An entry under `forbidden-words-insensitive` matches any case, a sentence start included.",
         "A possessive of a listed word fires too: the apostrophe only bounds the word, and the possessive of a forbidden spelling is still forbidden.",
     ],
     fix: &[

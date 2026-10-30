@@ -1,26 +1,28 @@
-use super::{ExcludeEntry, Settings, Word, words};
+use super::{Case, ExcludeEntry, Settings, Word, forbidden_words, words};
 use rstest::rstest;
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
 #[test]
 fn parses_every_required_key() {
     let config = Settings::parse(
-        "forbidden-words = [\"NOTES.md\", \"it is worth noting\"]\nsubscriber-crates = [\"tracing-subscriber\"]\n",
+        "forbidden-words = [\"NOTES.md\", \"it is worth noting\"]\nforbidden-words-insensitive = [\"behaviour\"]\nsubscriber-crates = [\"tracing-subscriber\"]\n",
     )
     .unwrap()
     .config;
     assert_eq!(
         config.forbidden_words,
-        words(&["NOTES.md", "it is worth noting"])
+        forbidden_words(&["NOTES.md", "it is worth noting"], &["behaviour"])
     );
     assert_eq!(config.subscriber_crates, words(&["tracing-subscriber"]));
 }
 
 #[test]
 fn accepts_empty_lists() {
-    let settings = Settings::parse("forbidden-words = []\nsubscriber-crates = []\n").unwrap();
+    let settings = Settings::parse(
+        "forbidden-words = []\nforbidden-words-insensitive = []\nsubscriber-crates = []\n",
+    )
+    .unwrap();
     assert_eq!(settings.config.forbidden_words, Vec::new());
     assert_eq!(settings.config.subscriber_crates, Vec::new());
     assert_eq!(settings.exclude, Vec::new());
@@ -29,7 +31,7 @@ fn accepts_empty_lists() {
 #[test]
 fn parses_exclude() {
     let settings = Settings::parse(
-        "forbidden-words = []\nsubscriber-crates = []\nexclude = [\"src/generated\", \"build.rs\"]\n",
+        "forbidden-words = []\nforbidden-words-insensitive = []\nsubscriber-crates = []\nexclude = [\"src/generated\", \"build.rs\"]\n",
     )
     .unwrap();
     let entries: Vec<&str> = settings.exclude.iter().map(ExcludeEntry::as_str).collect();
@@ -84,16 +86,20 @@ const BAD_ENTRY: &str = "entries must be non-empty, without surrounding whitespa
 
 #[rstest]
 #[case::unknown_key(
-    "forbidden-words = []\nsubscriber-crates = []\nseverity = \"warn\"\n",
-    "TOML parse error at line 3, column 1\n  |\n3 | severity = \"warn\"\n  | ^^^^^^^^\nunknown field `severity`, expected one of `forbidden-words`, `subscriber-crates`, `exclude`\n"
+    "forbidden-words = []\nforbidden-words-insensitive = []\nsubscriber-crates = []\nseverity = \"warn\"\n",
+    "TOML parse error at line 4, column 1\n  |\n4 | severity = \"warn\"\n  | ^^^^^^^^\nunknown field `severity`, expected one of `forbidden-words`, `forbidden-words-insensitive`, `subscriber-crates`, `exclude`\n"
 )]
 #[case::missing_subscriber_crates(
-    "forbidden-words = []\n",
+    "forbidden-words = []\nforbidden-words-insensitive = []\n",
     "TOML parse error at line 1, column 1\n  |\n1 | forbidden-words = []\n  | ^\nmissing field `subscriber-crates`\n"
 )]
+#[case::missing_forbidden_words_insensitive(
+    "forbidden-words = []\nsubscriber-crates = []\n",
+    "TOML parse error at line 1, column 1\n  |\n1 | forbidden-words = []\n  | ^\nmissing field `forbidden-words-insensitive`\n"
+)]
 #[case::missing_forbidden_words(
-    "subscriber-crates = []\n",
-    "TOML parse error at line 1, column 1\n  |\n1 | subscriber-crates = []\n  | ^\nmissing field `forbidden-words`\n"
+    "forbidden-words-insensitive = []\nsubscriber-crates = []\n",
+    "TOML parse error at line 1, column 1\n  |\n1 | forbidden-words-insensitive = []\n  | ^\nmissing field `forbidden-words`\n"
 )]
 #[case::wrong_type(
     "forbidden-words = \"AI\"\nsubscriber-crates = []\n",
@@ -133,34 +139,40 @@ fn rejects_empty_or_padded_entries(#[case] text: &str, #[case] expected: &str) {
     assert_eq!(Settings::parse(text).unwrap_err().to_string(), expected);
 }
 
-/// The word classes this workspace's code rules enforce, spelled exactly as they must match.
+/// The word classes this workspace's code rules enforce, spelled exactly as they must match,
+/// with the case class each is ruled to carry.
 #[rstest]
-#[case::document_names_a_reader_cannot_open(&[
+#[case::document_names_a_reader_cannot_open(Case::Exact, &[
     "RULES.md", "CODEMAP.md", "AGENTS.md", "HANDOFF.md", "TRACKS.md", "INVARIANTS.md",
     "DESIGN.md", "CLAUDE.md",
 ])]
-#[case::the_tools_used_to_write_the_code(&[
+#[case::the_tools_used_to_write_the_code(Case::Exact, &[
     "Claude", "Anthropic", "OpenAI", "ChatGPT", "GPT", "Copilot", "AI", "LLM", "LLMs",
 ])]
-#[case::spellings_that_must_stay_american(&[
+#[case::spellings_that_must_stay_american(Case::Insensitive, &[
     "behaviour", "behavioural", "initialise", "initialised", "initialising",
     "colour", "colourful", "favour", "favourable", "labour", "honour",
     "analyse", "analysed", "analysing", "optimise", "optimised", "optimising",
     "licence", "defence", "offence", "centre", "metre", "grey", "catalogue",
 ])]
-fn the_seed_list_carries_the_enforced_word_classes(#[case] enforced: &[&str]) {
+fn the_seed_list_carries_the_enforced_word_classes(#[case] case: Case, #[case] enforced: &[&str]) {
     let owned = repo_forbidden_words();
-    let listed: BTreeSet<&str> = owned.iter().map(String::as_str).collect();
-    let missing: Vec<&str> = enforced
-        .iter()
-        .copied()
-        .filter(|word| !listed.contains(word))
-        .collect();
-    assert_eq!(missing, Vec::<&str>::new());
+    for word in enforced {
+        let classes: Vec<Case> = owned
+            .iter()
+            .filter(|(entry, _)| entry == word)
+            .map(|(_, class)| *class)
+            .collect();
+        assert_eq!(
+            classes,
+            vec![case],
+            "`{word}` is listed under the wrong case class"
+        );
+    }
 }
 
-/// The forbidden-word list parsed from this repo's own samlinter.toml.
-fn repo_forbidden_words() -> Vec<String> {
+/// The forbidden words parsed from this repo's own samlinter.toml, with their case classes.
+fn repo_forbidden_words() -> Vec<(String, Case)> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("samlinter.toml");
     let text = fs::read_to_string(path).unwrap();
     Settings::parse(&text)
@@ -168,7 +180,7 @@ fn repo_forbidden_words() -> Vec<String> {
         .config
         .forbidden_words
         .iter()
-        .map(|word| word.as_str().to_owned())
+        .map(|word| (word.as_str().to_owned(), word.case()))
         .collect()
 }
 
@@ -178,16 +190,16 @@ fn repo_forbidden_words() -> Vec<String> {
 ///   and `cancelled` needs none (the doubled-l spelling is valid American too).
 #[test]
 fn the_seed_list_omits_the_ruled_out_forms() {
-    let listed = repo_forbidden_words();
+    let owned = repo_forbidden_words();
     for word in ["cancelled", "cancelling"] {
         assert!(
-            !listed.iter().any(|entry| entry == word),
+            !owned.iter().any(|(entry, _)| entry == word),
             "`{word}` entered the list"
         );
     }
-    let possessives: Vec<&String> = listed
+    let possessives: Vec<&(String, Case)> = owned
         .iter()
-        .filter(|entry| entry.ends_with("'s") || entry.ends_with("s'"))
+        .filter(|(entry, _)| entry.ends_with("'s") || entry.ends_with("s'"))
         .collect();
-    assert_eq!(possessives, Vec::<&String>::new());
+    assert_eq!(possessives, Vec::<&(String, Case)>::new());
 }

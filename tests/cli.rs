@@ -34,7 +34,7 @@ const VIOLATIONS: &[&str] = &[
     "lib/Cargo.toml:9:2: feature_flags: `[features]` table",
     "app/src/main.rs:3:1: fn_spacing: no blank line between this function and the previous one",
     "app/src/main.rs:4:12: forbidden_word: `NOTES.md` is listed in forbidden-words in samlinter.toml",
-    "samlinter.toml:3:8: forbidden_word: `NOTES.md` is listed in forbidden-words in samlinter.toml",
+    "samlinter.toml:4:8: forbidden_word: `NOTES.md` is listed in forbidden-words in samlinter.toml",
     "app/src/main.rs:2:1: item_spacing: no blank line between the last use item and this code",
     "lib/src/lib.rs:9:36: library_subscriber: library installs a log subscriber: `.init()`",
     "lib/src/lib.rs:1:1: malformed_exemption: rule `syntax_error` cannot be exempted",
@@ -334,7 +334,9 @@ fn scratch_config(name: &str, logging: Logging) -> [(&'static str, String); 2] {
         ),
         (
             "samlinter.toml",
-            format!("forbidden-words = []\nsubscriber-crates = [{subscribers}]\n"),
+            format!(
+                "forbidden-words = []\nforbidden-words-insensitive = []\nsubscriber-crates = [{subscribers}]\n"
+            ),
         ),
     ]
 }
@@ -693,7 +695,7 @@ fn excluded_files_are_not_linted() {
         vec![
             (
                 "samlinter.toml",
-                "forbidden-words = []\nsubscriber-crates = []\nexclude = [\"src/generated.rs\"]\n"
+                "forbidden-words = []\nforbidden-words-insensitive = []\nsubscriber-crates = []\nexclude = [\"src/generated.rs\"]\n"
                     .to_owned(),
             ),
             ("src/lib.rs", "mod generated;\n".to_owned()),
@@ -755,7 +757,7 @@ fn invalid_config_is_an_error() {
     let output = samlinter("misconfigured").unwrap();
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "samlinter: invalid samlinter.toml: TOML parse error at line 3, column 1\n  |\n3 | severity = \"warn\"\n  | ^^^^^^^^\nunknown field `severity`, expected one of `forbidden-words`, `subscriber-crates`, `exclude`\n\n"
+        "samlinter: invalid samlinter.toml: TOML parse error at line 4, column 1\n  |\n4 | severity = \"warn\"\n  | ^^^^^^^^\nunknown field `severity`, expected one of `forbidden-words`, `forbidden-words-insensitive`, `subscriber-crates`, `exclude`\n\n"
     );
     assert_eq!(output.status.code(), Some(2));
 }

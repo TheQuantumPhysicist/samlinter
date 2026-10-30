@@ -1,6 +1,6 @@
 mod emoji;
 
-use crate::config::Word;
+use crate::config::{Case, ForbiddenWord};
 use crate::finding::{Hit, Rule};
 
 const EM_DASH: char = '\u{2014}';
@@ -14,7 +14,7 @@ pub struct Piece<'a> {
 }
 
 /// Checks a whole documentation file.
-pub fn check(text: &str, forbidden_words: &[Word]) -> Vec<Hit> {
+pub fn check(text: &str, forbidden_words: &[ForbiddenWord]) -> Vec<Hit> {
     let piece = Piece { offset: 0, text };
     marks(piece)
         .chain(forbidden(&[piece], forbidden_words))
@@ -41,7 +41,7 @@ pub fn marks(piece: Piece) -> impl Iterator<Item = Hit> {
 /// - Forbidden-word hits in `pieces` read as one text, a line break joining each piece to
 ///   the next.
 /// - Each hit sits at its first character's byte offset in the file.
-pub fn forbidden(pieces: &[Piece], forbidden_words: &[Word]) -> Vec<Hit> {
+pub fn forbidden(pieces: &[Piece], forbidden_words: &[ForbiddenWord]) -> Vec<Hit> {
     let joined = pieces
         .iter()
         .map(|piece| piece.text)
@@ -66,16 +66,16 @@ pub fn forbidden(pieces: &[Piece], forbidden_words: &[Word]) -> Vec<Hit> {
 
     forbidden_words
         .iter()
-        .map(Word::as_str)
-        .flat_map(|word| {
+        .flat_map(|listed| {
+            let (word, case) = (listed.as_str(), listed.case());
             positions
                 .iter()
-                .filter(|&&(_, at)| is_whole_phrase_at(&joined, at, word))
+                .filter(|&&(_, at)| is_whole_phrase_at(&joined, at, word, case))
                 .map(move |&(offset, _)| {
                     Hit::new(
                         offset,
                         Rule::ForbiddenWord,
-                        format!("`{word}` is listed in forbidden-words in samlinter.toml"),
+                        format!("`{word}` is listed in {} in samlinter.toml", case.key()),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -89,9 +89,12 @@ pub fn on_next_line(between: &str) -> bool {
     between.chars().all(char::is_whitespace) && between.matches('\n').count() == 1
 }
 
-/// Whether `phrase` starts at byte `at` of `text` with neither neighbor a word character.
-fn is_whole_phrase_at(text: &str, at: usize, phrase: &str) -> bool {
-    let length = text.get(at..).and_then(|tail| phrase_length(tail, phrase));
+/// Whether `phrase` starts at byte `at` of `text` with case `case` and neither neighbor a
+/// word character.
+fn is_whole_phrase_at(text: &str, at: usize, phrase: &str, case: Case) -> bool {
+    let length = text
+        .get(at..)
+        .and_then(|tail| phrase_length(tail, phrase, case));
     length.is_some_and(|length| {
         let before = text.get(..at).and_then(|head| head.chars().next_back());
         let after = text.get(at + length..).and_then(|tail| tail.chars().next());
@@ -99,19 +102,43 @@ fn is_whole_phrase_at(text: &str, at: usize, phrase: &str) -> bool {
     })
 }
 
-/// - Byte length of `phrase` matched at the start of `text`, if it matches there.
+/// - Byte length of `phrase` matched at the start of `text` with case `case`, if it matches
+///   there.
 /// - Each whitespace run between the phrase's words matches any whitespace run in `text`,
 ///   line breaks included, so a phrase wrapped across lines still matches.
-fn phrase_length(text: &str, phrase: &str) -> Option<usize> {
+fn phrase_length(text: &str, phrase: &str, case: Case) -> Option<usize> {
     let mut words = phrase.split_whitespace();
     let first = words.next()?;
-    let first_end = text.starts_with(first).then_some(first.len())?;
+    let first_end = word_length(text, first, case)?;
     words.try_fold(first_end, |end, word| {
         let rest = text.get(end..)?;
         let body = rest.trim_start();
         let gap = rest.len() - body.len();
-        (gap > 0 && body.starts_with(word)).then_some(end + gap + word.len())
+        let word_end = word_length(body, word, case)?;
+        (gap > 0).then_some(end + gap + word_end)
     })
+}
+
+/// Byte length of `word` matched at the start of `text` with case `case`.
+fn word_length(text: &str, word: &str, case: Case) -> Option<usize> {
+    match case {
+        Case::Exact => text.starts_with(word).then_some(word.len()),
+        Case::Insensitive => folded_length(text, word),
+    }
+}
+
+/// - Byte length of `word` matched at the start of `text` whatever the case of each letter.
+/// - Character by character, so the matched length stays a byte length in `text`.
+fn folded_length(text: &str, word: &str) -> Option<usize> {
+    let mut tail = text;
+    for word_char in word.chars() {
+        let text_char = tail.chars().next()?;
+        if !text_char.to_lowercase().eq(word_char.to_lowercase()) {
+            return None;
+        }
+        tail = tail.get(text_char.len_utf8()..)?;
+    }
+    Some(text.len() - tail.len())
 }
 
 fn is_word_character(character: char) -> bool {

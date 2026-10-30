@@ -1,3 +1,4 @@
 forbidden-words = []
+forbidden-words-insensitive = []
 subscriber-crates = []
 severity = "warn"

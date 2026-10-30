@@ -1,6 +1,6 @@
 use super::super::text_file;
 use super::{FileKind, Installs, check};
-use crate::config::{Config, words};
+use crate::config::{Config, forbidden_words};
 use crate::workspace::TextFile;
 use ra_ap_syntax::Edition;
 use rstest::rstest;
@@ -11,7 +11,7 @@ const PHRASE: &str = "it is worth noting";
 fn findings_in(edition: Edition, installs: Installs, kind: FileKind, text: &str) -> Vec<String> {
     let file = text_file("src/lib.rs", text);
     let config = Config {
-        forbidden_words: words(&["NOTES.md", "AGENTS.md", "GPT", PHRASE]),
+        forbidden_words: forbidden_words(&["NOTES.md", "AGENTS.md", "GPT", PHRASE], &[]),
         subscriber_crates: Vec::new(),
     };
     check(&file, edition, &config, installs, kind)

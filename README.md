@@ -275,12 +275,17 @@ are an error.
 
 ```toml
 forbidden-words = ["NOTES.md", "it is worth noting"]
+forbidden-words-insensitive = ["organise", "learnt"]
 subscriber-crates = ["tracing-subscriber"]
 exclude = ["src/generated", "build/bindings.rs"]
 ```
 
-- `forbidden-words`: banned in comments and README files, matched case-sensitively as whole words.
-  The words of a phrase match across any whitespace run, line breaks included. Line comments
+- `forbidden-words`: banned in comments and README files, matched case-sensitively as whole words:
+  an entry fires only on text of its own case. Proper nouns and file names go here.
+- `forbidden-words-insensitive`: banned like `forbidden-words`, matched case-insensitively:
+  any casing of an entry fires, a sentence start included. Spellings that must stay American
+  go here.
+- The words of a phrase match across any whitespace run, line breaks included. Line comments
   of one kind on consecutive lines (`//`, `///` or `//!` in Rust, `#` in TOML) read as one
   text with their markers dropped, so a phrase wrapped onto the next comment line matches; a
   blank line or code between them ends the run. A finding points at the phrase's first

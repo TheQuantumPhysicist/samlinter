@@ -1,3 +1,4 @@
 forbidden-words = ["NOTES.md"]
+forbidden-words-insensitive = []
 subscriber-crates = ["tracing-subscriber"]
 # Read NOTES.md first.

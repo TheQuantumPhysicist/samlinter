@@ -5,11 +5,11 @@ use std::path::{Component, Path};
 /// What the rules read from `samlinter.toml`.
 #[derive(Debug)]
 pub struct Config {
-    /// - Words or phrases banned in comments, Rust and TOML, and README files.
-    /// - Matched case-sensitively as whole words.
+    /// - Words or phrases banned in comments, Rust and TOML, and README files, each with
+    ///   the case class of the key it was listed under.
     /// - The words of a phrase match across any whitespace run, so a phrase wrapped across
     ///   lines or consecutive line comments still matches.
-    pub forbidden_words: Vec<Word>,
+    pub forbidden_words: Vec<ForbiddenWord>,
     /// - Crates that install a log subscriber.
     /// - A package without a binary target that lists one as a regular dependency gets its
     ///   library code checked: each install call there (`.init()`, `set_global_default(..)`,
@@ -32,6 +32,7 @@ pub struct Settings {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct File {
     forbidden_words: Vec<Word>,
+    forbidden_words_insensitive: Vec<Word>,
     subscriber_crates: Vec<Word>,
     #[serde(default)]
     exclude: Vec<ExcludeEntry>,
@@ -41,16 +42,68 @@ impl Settings {
     pub fn parse(text: &str) -> Result<Self> {
         let File {
             forbidden_words,
+            forbidden_words_insensitive,
             subscriber_crates,
             exclude,
         } = toml_edit::de::from_str(text)?;
         Ok(Self {
             config: Config {
-                forbidden_words,
+                forbidden_words: forbidden_words
+                    .into_iter()
+                    .map(|word| listed_word(word, Case::Exact))
+                    .chain(
+                        forbidden_words_insensitive
+                            .into_iter()
+                            .map(|word| listed_word(word, Case::Insensitive)),
+                    )
+                    .collect(),
                 subscriber_crates,
             },
             exclude,
         })
+    }
+}
+
+const fn listed_word(word: Word, case: Case) -> ForbiddenWord {
+    ForbiddenWord { word, case }
+}
+
+/// - A forbidden word with the case class of the key it was listed under.
+/// - `forbidden-words` holds proper nouns and file names, `forbidden-words-insensitive`
+///   spellings that must stay American.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ForbiddenWord {
+    word: Word,
+    case: Case,
+}
+
+impl ForbiddenWord {
+    pub fn as_str(&self) -> &str {
+        self.word.as_str()
+    }
+
+    pub const fn case(&self) -> Case {
+        self.case
+    }
+}
+
+/// The case class of a forbidden word: how its text compares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Case {
+    /// Byte-exact, so an entry fires only on text of its own case and a capitalized
+    /// sentence start escapes a lowercase entry.
+    Exact,
+    /// Case-folded, so an entry fires on any case, a sentence start included.
+    Insensitive,
+}
+
+impl Case {
+    /// The `samlinter.toml` key that lists words of this class.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Case::Exact => "forbidden-words",
+            Case::Insensitive => "forbidden-words-insensitive",
+        }
     }
 }
 
@@ -121,6 +174,29 @@ pub fn words(entries: &[&str]) -> Vec<Word> {
         .iter()
         .map(|entry| Word::try_from((*entry).to_owned()).unwrap())
         .collect()
+}
+
+/// `exact` and `insensitive` as forbidden words of their case class; each must be valid.
+#[cfg(test)]
+pub fn forbidden_words(exact: &[&str], insensitive: &[&str]) -> Vec<ForbiddenWord> {
+    let mut listed: Vec<ForbiddenWord> = exact
+        .iter()
+        .map(|entry| test_word(entry, Case::Exact))
+        .collect();
+    listed.extend(
+        insensitive
+            .iter()
+            .map(|entry| test_word(entry, Case::Insensitive)),
+    );
+    listed
+}
+
+#[cfg(test)]
+fn test_word(entry: &str, case: Case) -> ForbiddenWord {
+    ForbiddenWord {
+        word: Word::try_from(entry.to_owned()).unwrap(),
+        case,
+    }
 }
 
 #[cfg(test)]

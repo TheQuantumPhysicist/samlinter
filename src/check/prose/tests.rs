@@ -1,11 +1,11 @@
 use super::{Piece, check, forbidden};
-use crate::config::words;
+use crate::config::forbidden_words;
 use rstest::rstest;
 
 /// Hits as `offset rule`.
 fn render(text: &str) -> Vec<String> {
-    let words = words(&["NOTES.md", "AI", "it is worth noting", "x-x"]);
-    check(text, &words)
+    let listed = forbidden_words(&["NOTES.md", "AI", "it is worth noting", "x-x"], &[]);
+    check(text, &listed)
         .iter()
         .map(|hit| format!("{} {}", hit.offset, hit.rule.name()))
         .collect()
@@ -48,10 +48,13 @@ fn forbidden_words_read_pieces_as_one_text_at_their_file_offsets() {
             text: " noting AI",
         },
     ];
-    let offsets: Vec<usize> = forbidden(&pieces, &words(&["AI", "it is worth noting"]))
-        .iter()
-        .map(|hit| hit.offset)
-        .collect();
+    let offsets: Vec<usize> = forbidden(
+        &pieces,
+        &forbidden_words(&["AI", "it is worth noting"], &[]),
+    )
+    .iter()
+    .map(|hit| hit.offset)
+    .collect();
     assert_eq!(offsets, [48, 11]);
 }
 
@@ -67,27 +70,75 @@ fn messages_name_the_code_point(#[case] text: &str, #[case] expected: &[&str]) {
     assert_eq!(messages, expected);
 }
 
-/// - Each hit in `text` as `offset rule`, with `listed` as the whole word list.
-/// - A listed word fires only on text of its exact case, as a whole word.
-/// - A possessive of a listed word is still the listed word: the apostrophe bounds it.
+/// Hits as `offset rule`, with the words of each case class listed.
+fn hits(exact: &[&str], insensitive: &[&str], text: &str) -> Vec<String> {
+    forbidden(
+        &[Piece { offset: 0, text }],
+        &forbidden_words(exact, insensitive),
+    )
+    .iter()
+    .map(|hit| format!("{} {}", hit.offset, hit.rule.name()))
+    .collect()
+}
+
+/// - An exact-class word (listed under `forbidden-words`) fires only on its exact case, as
+///   a whole word.
 #[rstest]
-#[case::the_listed_spelling_fires(&["behaviour"], "the behaviour of", &["4 forbidden_word"])]
-#[case::the_possessive_of_a_listed_word_fires(&["behaviour"], "the behaviour's", &["4 forbidden_word"])]
-#[case::the_other_case_stays_silent(&["behaviour"], "Behaviour differs", &[])]
-#[case::the_american_spelling_stays_silent(&["behaviour", "behavioural"], "its behavior", &[])]
-#[case::no_substring_hits(&["grey"], "greyhound", &[])]
-#[case::a_derived_form_is_a_different_word(&["centre"], "centred on", &[])]
-#[case::a_plural_is_a_different_word(&["LLM"], "three LLMs", &[])]
-#[case::the_listed_plural_fires(&["LLM", "LLMs"], "three LLMs", &["6 forbidden_word"])]
-#[case::a_proper_noun_fires_as_written(&["GPT"], "ask GPT", &["4 forbidden_word"])]
-fn seed_word_classes_match_their_exact_case_as_whole_words(
-    #[case] listed: &[&str],
+#[case::the_file_name_fires_as_written(&["RULES.md"], &[], "see RULES.md", &["4 forbidden_word"])]
+#[case::the_lowercase_file_name_stays_silent(&["RULES.md"], &[], "see rules.md", &[])]
+#[case::a_proper_noun_fires_as_written(&["Claude"], &[], "ask Claude", &["4 forbidden_word"])]
+#[case::the_lowercase_proper_noun_stays_silent(&["Claude"], &[], "ask claude", &[])]
+#[case::the_listed_plural_fires(&["LLM", "LLMs"], &[], "three LLMs", &["6 forbidden_word"])]
+#[case::a_plural_of_one_entry_stays_silent(&["LLM"], &[], "three LLMs", &[])]
+#[case::the_possessive_fires(&["Claude"], &[], "Claude's API", &["0 forbidden_word"])]
+fn exact_class_matches_only_its_exact_case_as_whole_words(
+    #[case] exact: &[&str],
+    #[case] insensitive: &[&str],
     #[case] text: &str,
     #[case] expected: &[&str],
 ) {
-    let hits: Vec<String> = forbidden(&[Piece { offset: 0, text }], &words(listed))
-        .iter()
-        .map(|hit| format!("{} {}", hit.offset, hit.rule.name()))
-        .collect();
-    assert_eq!(hits, expected);
+    assert_eq!(hits(exact, insensitive, text), expected);
+}
+
+/// - An insensitive-class word (listed under `forbidden-words-insensitive`) fires on any
+///   case, a sentence start included: the listed spelling is banned whatever case it wears.
+/// - Folding never widens the match: a longer word that merely contains one stays silent,
+///   and the apostrophe of a possessive still bounds the word.
+#[rstest]
+#[case::the_listed_spelling_fires(&[], &["behaviour"], "the behaviour of", &["4 forbidden_word"])]
+#[case::a_sentence_start_fires(&[], &["behaviour"], "Behaviour differs", &["0 forbidden_word"])]
+#[case::any_casing_fires(&[], &["behaviour"], "the BEHAVIOUR of", &["4 forbidden_word"])]
+#[case::the_possessive_fires_under_folding(&[], &["behaviour"], "the behaviour's", &["4 forbidden_word"])]
+#[case::the_american_spelling_stays_silent(&[], &["behaviour", "behavioural"], "its behavior", &[])]
+#[case::the_folded_whole_word_negative_stays_silent(&[], &["grey"], "the Greyhound", &[])]
+#[case::the_lowercase_word_inside_a_longer_one_stays_silent(&[], &["grey"], "the greyhound", &[])]
+#[case::a_derived_form_is_a_different_word(&[], &["centre"], "centred on", &[])]
+fn insensitive_class_matches_any_case_as_whole_words(
+    #[case] exact: &[&str],
+    #[case] insensitive: &[&str],
+    #[case] text: &str,
+    #[case] expected: &[&str],
+) {
+    assert_eq!(hits(exact, insensitive, text), expected);
+}
+
+/// - A hit's message names the `samlinter.toml` key of the word's own case class, so the
+///   reader hunts for the word in the list that banned it.
+#[rstest]
+#[case::the_exact_class_names_forbidden_words(&["RULES.md"], &[], "see RULES.md", "`RULES.md` is listed in forbidden-words in samlinter.toml")]
+#[case::the_insensitive_class_names_forbidden_words_insensitive(&[], &["behaviour"], "the behaviour of", "`behaviour` is listed in forbidden-words-insensitive in samlinter.toml")]
+fn messages_name_the_key_of_the_words_own_class(
+    #[case] exact: &[&str],
+    #[case] insensitive: &[&str],
+    #[case] text: &str,
+    #[case] expected: &str,
+) {
+    let messages: Vec<String> = forbidden(
+        &[Piece { offset: 0, text }],
+        &forbidden_words(exact, insensitive),
+    )
+    .iter()
+    .map(|hit| hit.message.clone())
+    .collect();
+    assert_eq!(messages, [expected.to_owned()]);
 }

@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 
 const ROOT: &str = "/ws";
 
-const CONFIG: &str = "forbidden-words = []\nsubscriber-crates = []\n";
+const CONFIG: &str =
+    "forbidden-words = []\nforbidden-words-insensitive = []\nsubscriber-crates = []\n";
 
 /// - Loads a workspace at `/ws` holding `files` plus a root `Cargo.toml` and `samlinter.toml`;
 ///   an entry in `files` replaces either.
@@ -655,15 +656,15 @@ fn nested_cfg_attr_paths_follow_each_existing_directory_once(#[case] path: &str)
 )]
 #[case::absolute_exclude(
     &[("p/src/lib.rs", Content::Text("")), ("samlinter.toml", excluding("\"/ws/p\""))],
-    "invalid samlinter.toml: TOML parse error at line 3, column 11\n  |\n3 | exclude = [\"/ws/p\"]\n  |           ^^^^^^^^^\n`exclude` entry `/ws/p` is absolute; write it relative to the workspace root\n"
+    "invalid samlinter.toml: TOML parse error at line 4, column 11\n  |\n4 | exclude = [\"/ws/p\"]\n  |           ^^^^^^^^^\n`exclude` entry `/ws/p` is absolute; write it relative to the workspace root\n"
 )]
 #[case::exclude_above_the_root(
     &[("p/src/lib.rs", Content::Text("")), ("samlinter.toml", excluding("\"..\""))],
-    "invalid samlinter.toml: TOML parse error at line 3, column 11\n  |\n3 | exclude = [\"..\"]\n  |           ^^^^^^\n`exclude` entry `..` climbs above the workspace root\n"
+    "invalid samlinter.toml: TOML parse error at line 4, column 11\n  |\n4 | exclude = [\"..\"]\n  |           ^^^^^^\n`exclude` entry `..` climbs above the workspace root\n"
 )]
 #[case::exclude_climbing_out_and_back(
     &[("p/src/lib.rs", Content::Text("")), ("samlinter.toml", excluding("\"p/../../ws/p\""))],
-    "invalid samlinter.toml: TOML parse error at line 3, column 11\n  |\n3 | exclude = [\"p/../../ws/p\"]\n  |           ^^^^^^^^^^^^^^^^\n`exclude` entry `p/../../ws/p` climbs above the workspace root\n"
+    "invalid samlinter.toml: TOML parse error at line 4, column 11\n  |\n4 | exclude = [\"p/../../ws/p\"]\n  |           ^^^^^^^^^^^^^^^^\n`exclude` entry `p/../../ws/p` climbs above the workspace root\n"
 )]
 // The disk checks of an entry live in `exclude`; this pins that the load names the config.
 #[case::exclude_naming_nothing(
