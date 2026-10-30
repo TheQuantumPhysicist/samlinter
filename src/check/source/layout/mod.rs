@@ -2,7 +2,7 @@ use super::start;
 use crate::finding::{Hit, Rule};
 use crate::syntax::{cfg_attributes, is_bare_cfg_atom, is_test_gated, is_test_module};
 use ra_ap_syntax::ast::{self, HasAttrs, HasModuleItem, HasName};
-use ra_ap_syntax::{AstNode, AstToken, SyntaxNode, SyntaxToken};
+use ra_ap_syntax::{AstNode, AstToken, NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken};
 use std::cmp::Ordering;
 
 /// Where an item belongs in a module; declaration order is the required order.
@@ -262,6 +262,30 @@ fn order(items: &[Placed]) -> Vec<Hit> {
         .collect()
 }
 
+/// - True when the item opens with an outer doc comment: a leading `DOC_COMMENT` node.
+/// - rustfmt keeps a blank line after a doc-commented item, so that blank is
+///   load-bearing, not a spacing violation.
+/// - Leading elements only: the `#[doc = ..]` attribute form is still flagged
+///   (shortcut: rare form; upgrade if it shows up in practice).
+fn doc_commented(item: &SyntaxNode) -> bool {
+    for element in item.children_with_tokens() {
+        match element {
+            NodeOrToken::Node(node) => {
+                if node.kind() == SyntaxKind::DOC_COMMENT {
+                    return true;
+                }
+                return false;
+            }
+            NodeOrToken::Token(token) => {
+                if token.kind() != SyntaxKind::WHITESPACE {
+                    return false;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Checks each pair of neighbors against the one spacing their kinds require.
 fn spacing(items: &[Placed]) -> Vec<Hit> {
     items
@@ -270,8 +294,12 @@ fn spacing(items: &[Placed]) -> Vec<Hit> {
         .filter_map(|(first, second)| {
             let blank = blank_line_between(first.node, second.node);
             let at = start(second.node);
-            match (required_spacing(first, second), blank) {
-                (Spacing::Contiguous, true) => Some(Hit::new(
+            match (
+                required_spacing(first, second),
+                blank,
+                doc_commented(first.node),
+            ) {
+                (Spacing::Contiguous, true, false) => Some(Hit::new(
                     at,
                     Rule::ItemSpacing,
                     format!(
@@ -279,7 +307,7 @@ fn spacing(items: &[Placed]) -> Vec<Hit> {
                         second.kind.slot().name()
                     ),
                 )),
-                (Spacing::Separated, false) => Some(Hit::new(
+                (Spacing::Separated, false, _) => Some(Hit::new(
                     at,
                     Rule::ItemSpacing,
                     format!(
@@ -288,14 +316,15 @@ fn spacing(items: &[Placed]) -> Vec<Hit> {
                         second.kind.slot().name()
                     ),
                 )),
-                (Spacing::BetweenFunctions, false) => Some(Hit::new(
+                (Spacing::BetweenFunctions, false, _) => Some(Hit::new(
                     at,
                     Rule::FnSpacing,
                     "no blank line between this function and the previous one",
                 )),
-                (Spacing::Contiguous, false)
-                | (Spacing::Separated | Spacing::BetweenFunctions, true)
-                | (Spacing::Free, true | false) => None,
+                (Spacing::Contiguous, true, true)
+                | (Spacing::Contiguous, false, _)
+                | (Spacing::Separated | Spacing::BetweenFunctions, true, _)
+                | (Spacing::Free, _, _) => None,
             }
         })
         .collect()

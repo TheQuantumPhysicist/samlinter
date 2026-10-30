@@ -114,7 +114,7 @@ Rust sources are found the way the compiler finds them, not by listing directori
 | `rest_pattern` | `..` inside struct, tuple-struct and tuple patterns, which silently absorbs a field added later |
 | `restricted_visibility` | `pub(crate)`, `pub(super)`, `pub(in path)` |
 | `item_order` | module items out of order: mod declarations, use items, `#[cfg(test)]` use items, code, other `#[cfg(test)]` modules, `#[cfg(test)] mod tests;` |
-| `item_spacing` | a blank line inside a group of use items, or no blank line after the mod declarations, the use items or the `#[cfg(test)]` use items |
+| `item_spacing` | a blank line inside a group of use items, unless the earlier use item has a doc comment (rustfmt keeps that blank), or no blank line after the mod declarations, the use items or the `#[cfg(test)]` use items |
 | `fn_spacing` | consecutive functions with bodies, in a module, an impl or trait body, or a block, with no blank line between them |
 | `em_dash` | U+2014 in a comment |
 | `emoji` | an emoji in a comment, one finding per visible emoji, at its first character |

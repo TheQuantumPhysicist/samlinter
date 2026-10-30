@@ -124,9 +124,21 @@ fn flags_items_out_of_order(#[case] text: &str, #[case] expected: &[&str]) {
 
 #[rstest]
 #[case::blank_line_inside_use_block("use std::fmt;\n\nuse std::io;\n", &["3:1 item_spacing"])]
+#[case::doc_commented_use_keeps_its_separating_blank(
+    "/// Builds the frame, re-exported for downstream crates.\npub use crate::frame::build;\n\npub use crate::frame::parse;\n",
+    &[]
+)]
+#[case::doc_commented_use_without_blank_still_touches(
+    "/// Builds the frame.\npub use crate::frame::build;\npub use crate::frame::parse;\n",
+    &[]
+)]
 #[case::blank_line_inside_test_use_block(
     "#[cfg(test)]\nuse a;\n\n#[cfg(test)]\nuse b;\n",
     &["4:1 item_spacing"]
+)]
+#[case::doc_commented_test_use_keeps_its_separating_blank(
+    "/// Wires the test harness.\n#[cfg(test)]\nuse a;\n\n#[cfg(test)]\nuse b;\n",
+    &[]
 )]
 #[case::mods_touch_uses("mod alpha;\nuse std::io;\n", &["2:1 item_spacing"])]
 #[case::mods_touch_code("mod alpha;\nfn f() {}\n", &["2:1 item_spacing"])]
