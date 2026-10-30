@@ -2,9 +2,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-// - TODO: rules still planned, each needing a stated reason at the site: discarded results
-//   (`let _ =`), `try_from(..).unwrap_or(..)` without a clamp, lint allows, test skips, shared
-//   mutable collections; and TODOs without a reason and a plan.
+// - TODO: rules still planned, each needing a stated reason at the site: `try_from(..).unwrap_or(..)`
+//   without a clamp, lint allows, test skips, shared mutable collections; and TODOs without a
+//   reason and a plan.
 // - Postponed: two open decisions: whether an exemption attribute's `reason` counts as the
 //   stated reason, and the TODO format to check.
 // - Plan: once decided, add each as a `Rule` variant with its check, guidance and tests.
@@ -25,21 +25,28 @@ use std::str::FromStr;
 #[strum(serialize_all = "snake_case")]
 pub enum Rule {
     BinaryReadme,
+    DiscardedResult,
+    DirectRng,
     EmDash,
     Emoji,
+    EnumIs,
     FeatureFlags,
     FnSpacing,
     ForbiddenWord,
     ItemOrder,
     ItemSpacing,
+    JsonMacro,
     LibrarySubscriber,
     MalformedExemption,
+    MatchesMacro,
     MemberVersion,
     ModuleShape,
     PanicStrategy,
     PathAttr,
+    RegexUse,
     RestPattern,
     RestrictedVisibility,
+    SystemTimeNow,
     SyntaxError,
     UnfulfilledExemption,
     WorkspaceDependencyForm,
@@ -57,20 +64,27 @@ impl Rule {
     /// - Syntax errors and exemption bookkeeping never are, so an exemption cannot hide itself.
     pub const fn exemptability(self) -> Exemptability {
         match self {
-            Self::EmDash
+            Self::DirectRng
+            | Self::EmDash
             | Self::Emoji
+            | Self::EnumIs
             | Self::FnSpacing
             | Self::ForbiddenWord
             | Self::ItemOrder
             | Self::ItemSpacing
+            | Self::JsonMacro
             | Self::LibrarySubscriber
+            | Self::MatchesMacro
             | Self::ModuleShape
             | Self::PathAttr
+            | Self::RegexUse
             | Self::RestPattern
-            | Self::RestrictedVisibility => Exemptability::Source(SourceExemptable(self)),
+            | Self::RestrictedVisibility
+            | Self::SystemTimeNow => Exemptability::Source(SourceExemptable(self)),
             Self::MemberVersion => Exemptability::Manifest(ManifestExemptable::MemberVersion),
             Self::FeatureFlags => Exemptability::Manifest(ManifestExemptable::FeatureFlags),
             Self::BinaryReadme
+            | Self::DiscardedResult
             | Self::MalformedExemption
             | Self::PanicStrategy
             | Self::SyntaxError

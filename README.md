@@ -118,6 +118,13 @@ Rust sources are found the way the compiler finds them, not by listing directori
 | `library_subscriber` | a call that installs a log subscriber in a library's code, see below |
 | `path_attr` | each `path` attribute: `#[path = ".."]`, `#![path = ".."]` and a `path` inside `cfg_attr(..)`, see below |
 | `module_shape` | a file the walk reaches as `something.rs` that declares an out-of-line module, see below |
+| `matches_macro` | a `matches!(..)` invocation, by any path spelling |
+| `enum_is` | `EnumIs` in a `#[derive(..)]` list |
+| `system_time_now` | a `now()` call on `SystemTime`, `Instant` (std or tokio), `Utc` or `Local`, by any route |
+| `regex_use` | the regex crate: any path whose leading segment is `regex`, plus a `Regex::new` / `RegexBuilder::new` constructor path, called or not; look-alike crates stay silent |
+| `direct_rng` | direct randomness: `thread_rng()`, `random()`, an RNG type (`OsRng`, `StdRng`, `SmallRng`, `ChaChaRng`), `from_entropy` or `seed_from_u64` |
+| `json_macro` | a `json!` macro invocation in non-test code, see below |
+| `discarded_result` | a `let _ = ..;` with no comment stating why the discard is safe on its line or the one above |
 
 - `rest_pattern`: also on the left of a destructuring assignment, such as `(a, ..) = t;` or
   `(..) = t;`.
@@ -188,6 +195,43 @@ Rust sources are found the way the compiler finds them, not by listing directori
   declared inside function bodies or macro bodies are not seen.
 - `module_shape`: exempted on the `mod x;` item, or by an inner expect at the top of the
   file, which covers every declaration in it.
+- `matches_macro`: flagged at the macro's name, whatever path it is spelled by. Any other
+  macro, and any call to a function or method named `matches`, is not a finding.
+- `enum_is`: at most one finding per derive list, at the first `EnumIs` token; a list
+  nested in another attribute's token tree, as in `cfg_attr(.., derive(..))`, counts the
+  same as a direct `#[derive(..)]`.
+- `system_time_now`: matched by name, so a `.now()` method call on a value of unknown type
+  is not a finding. A bare `now` reference with no call parentheses, as in
+  `let f = Utc::now;`, is not a call and stays silent. `Duration` and `TimeDelta`
+  arithmetic stays allowed.
+- `regex_use`: the leading-segment match covers use trees at any depth
+  (`use regex::{Regex, internal::..}`) and every type or expression path; the constructor
+  match covers any path ending in `Regex::new` / `RegexBuilder::new` whose leading segment
+  is not `regex`, called or not.
+- `direct_rng`: an RNG type name flags wherever it appears in a path: a use tree, a type
+  annotation, a bare value, or a constructor called on it. `random` counts only with call
+  parentheses or a turbofish.
+- `direct_rng`: matched by name with no type information: a trait-method call such as
+  `rng.gen()` is not flagged, so the rule is a tripwire for constructors and free
+  functions, not a proof.
+- `json_macro`: every path form counts: `json!(..)`, `serde_json::json!(..)`, any leading path
+  ending in `::json!`, in expression or item position, reported at the macro's name. A
+  `json!` inside a macro body is not seen.
+- `json_macro`: silent inside test code: an item under a `#[cfg(test)]` module or function
+  (an inline module's inner `#![cfg(test)]` counts), or inside a test function, one marked
+  by an attribute whose path ends in `test` (`#[test]`, `#[tokio::test]`). Elsewhere a
+  single justified use is exempted with an expect on the function or item that holds it.
+- `discarded_result`: every `let _ = ..;` with an initializer. samlinter sees no types, so
+  it cannot tell a fallible call from an infallible one: the workspace's code rules want a
+  stated reason on every deliberate discard, and one line on a rare non-fallible discard
+  is the accepted cost. A `let _ = &field;` existence assertion counts like any other.
+- `discarded_result`: the comment is not an exemption attribute; it is the rule's own
+  satisfied condition: a comment token on the statement's line or on the line directly
+  above it. A blank line between the comment and the statement breaks adjacency, and a
+  comment above a different statement explains that one, not this one. The statement's
+  first line is its first attribute or the `let`; its last line is the semicolon's.
+- `discarded_result`: accepts no expect attribute; an exemption naming it is a
+  `malformed_exemption`.
 
 The comment rules read every comment, doc comments included, also inside macro bodies.
 They read the `#` comments of every `Cargo.toml` samlinter checks and of `samlinter.toml`
@@ -269,15 +313,16 @@ Every exemption needs a reason, and is written in the kind of file its findings 
 
 - Rust: every rule with findings in Rust source, `rest_pattern`, `restricted_visibility`,
   `item_order`, `item_spacing`, `fn_spacing`, `em_dash`, `emoji`, `forbidden_word`,
-  `library_subscriber`, `path_attr` and `module_shape`, on the node that holds the finding. A comment that belongs to no node
+  `json_macro`, `library_subscriber`, `path_attr`, `module_shape`, `matches_macro`, `enum_is`,
+  `system_time_now`, `regex_use` and `direct_rng`, on the node that holds the finding. A comment that belongs to no node
   cannot be exempted (see below).
 - A member `Cargo.toml`: `member_version`.
 - A package `Cargo.toml`, a member's or the root package's: `feature_flags`. A virtual root
   has no `[package]` table to write the exemption in, so its `[features]` table, if any,
   cannot be exempted.
-- Nowhere: `syntax_error`, `malformed_exemption`, `unfulfilled_exemption` and the other
-  Cargo.toml rules. Comment findings in `Cargo.toml`, `samlinter.toml` and README files
-  cannot be exempted either: no attribute can sit there.
+- Nowhere: `syntax_error`, `discarded_result`, `malformed_exemption`,
+  `unfulfilled_exemption` and the other Cargo.toml rules. Comment findings in `Cargo.toml`,
+  `samlinter.toml` and README files cannot be exempted either: no attribute can sit there.
 
 An exemption naming a rule in the other kind of file, or a rule that accepts none, is a
 `malformed_exemption`.

@@ -1,4 +1,7 @@
+mod banned;
+mod discarded_result;
 mod exemption;
+mod json_macro;
 mod layout;
 mod module_shape;
 mod path_attr;
@@ -9,9 +12,12 @@ mod visibility;
 use super::prose::{self, Piece};
 use crate::config::Config;
 use crate::finding::{BOM, Finding, Hit, Rule, positions};
+use crate::syntax::{has_test_attribute, is_test_gated};
 use crate::workspace::{FileKind, TextFile};
 use ra_ap_syntax::ast::CommentShape;
-use ra_ap_syntax::{AstNode, AstToken, Edition, NodeOrToken, SyntaxError, SyntaxNode, ast};
+use ra_ap_syntax::{
+    AstNode, AstToken, Edition, NodeOrToken, SyntaxError, SyntaxNode, WalkEvent, ast,
+};
 use std::path::Path;
 pub use subscriber::{Gate, Installs};
 
@@ -72,12 +78,15 @@ fn lint(
 ) -> Vec<Hit> {
     let root = tree.syntax();
     let hits = patterns::check(root)
+        .chain(banned::check(root))
         .chain(visibility::check(root))
         .chain(path_attr::check(root))
         .chain(module_shape::check(tree, kind, shown))
         .chain(layout::check(tree))
         .chain(comment_hits(root, text, config))
         .chain(subscriber::check(root, installs))
+        .chain(json_macro::check(root))
+        .chain(discarded_result::check(root, text))
         .collect();
     exemption::apply(root, hits)
 }
@@ -88,11 +97,7 @@ fn lint(
 /// - Forbidden words are found in each run of line comments read as one text, markers
 ///   dropped, so a phrase wrapped onto the next comment line still matches.
 fn comment_hits(root: &SyntaxNode, text: &str, config: &Config) -> Vec<Hit> {
-    let comments: Vec<ast::AnyComment> = root
-        .descendants_with_tokens()
-        .filter_map(NodeOrToken::into_token)
-        .filter_map(ast::AnyComment::cast)
-        .collect();
+    let comments = comment_tokens(root);
 
     let marks = comments.iter().flat_map(|comment| {
         prose::marks(Piece {
@@ -107,6 +112,15 @@ fn comment_hits(root: &SyntaxNode, text: &str, config: &Config) -> Vec<Hit> {
             prose::forbidden(&pieces, &config.forbidden_words)
         });
     marks.chain(words).collect()
+}
+
+/// - Every comment token, macro bodies included, where doc comments stay bare tokens.
+/// - The one comment scan: the comment rules and `discarded_result` read these tokens.
+fn comment_tokens(root: &SyntaxNode) -> Vec<ast::AnyComment> {
+    root.descendants_with_tokens()
+        .filter_map(NodeOrToken::into_token)
+        .filter_map(ast::AnyComment::cast)
+        .collect()
 }
 
 /// - Whether `below` continues the run of `above`: both line comments of one kind (plain,
@@ -144,6 +158,37 @@ fn start(node: &SyntaxNode) -> usize {
         .find(|element| !element.kind().is_trivia());
     let range = first.map_or_else(|| node.text_range(), |element| element.text_range());
     usize::from(range.start())
+}
+
+/// Where a node's own text ends: its last non-trivia child's end.
+fn end(node: &SyntaxNode) -> usize {
+    let last = node
+        .children_with_tokens()
+        .filter(|element| !element.kind().is_trivia())
+        .last();
+    let range = last.map_or_else(|| node.text_range(), |element| element.text_range());
+    usize::from(range.end())
+}
+
+/// - Each node outside test code, folded by `at` into the rule's findings.
+/// - Test code: a node whose own attributes require `test`, or a test function, or anything
+///   inside either. A test subtree is skipped whole, so the walk stays linear.
+fn outside_test_code<T>(root: &SyntaxNode, mut at: impl FnMut(&SyntaxNode) -> Option<T>) -> Vec<T> {
+    let mut walk = root.preorder();
+    let mut found = Vec::new();
+    while let Some(event) = walk.next() {
+        match event {
+            WalkEvent::Enter(node) => {
+                if is_test_gated(&node) || has_test_attribute(&node) {
+                    walk.skip_subtree();
+                } else if let Some(item) = at(&node) {
+                    found.push(item);
+                }
+            }
+            WalkEvent::Leave(_) => {}
+        }
+    }
+    found
 }
 
 /// Runs `rule` on edition-2024 `text`, which must parse.

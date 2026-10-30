@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 /// - `lib`'s em-dash exemption on `install` covers the doc comment above it.
 const VIOLATIONS: &[&str] = &[
     "app/Cargo.toml: binary_readme: binary package has no README at app/README.md",
+    "lib/src/lib.rs:10:5: discarded_result: `let _ =` discards a result without a stated reason",
     "README.md:1:11: em_dash: em-dash (U+2014)",
     "app/Cargo.toml:9:13: em_dash: em-dash (U+2014)",
     "app/src/main.rs:5:27: em_dash: em-dash (U+2014)",
@@ -422,6 +423,13 @@ fn deep_broken_workspace(logging: Logging) -> io::Result<(PathBuf, OnDrop<impl F
 
 /// Runs samlinter on `manifest`, asserting it finishes within `TIME_BUDGET`.
 fn run_timed(manifest: &Path) -> io::Result<Output> {
+    #[cfg_attr(
+        samlinter,
+        expect(
+            system_time_now,
+            reason = "asserts TIME_BUDGET on the run's own wall time; test instrumentation, not logic"
+        )
+    )]
     let started = Instant::now();
     let output = run(&[OsStr::new("--manifest-path"), manifest.as_os_str()])?;
     let elapsed = started.elapsed();

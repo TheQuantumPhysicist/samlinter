@@ -7,6 +7,7 @@ pub fn answer() -> u8 {
 #[cfg_attr(samlinter, expect(em_dash, reason = "fixture: a fulfilled comment-rule exemption"))]
 pub fn install() {
     tracing_subscriber::registry().init();
+    let _ = format!("fixture");
 }
 
 #[cfg(test)]

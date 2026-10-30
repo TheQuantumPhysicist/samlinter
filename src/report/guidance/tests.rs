@@ -30,6 +30,14 @@ fn every_rule_explains_why_how_and_what_not_to_do() {
     Rule::BinaryReadme,
     "Someone who finds a binary needs to know what it is for and how to run it without reading its source."
 )]
+#[case::discarded_result(
+    Rule::DiscardedResult,
+    "A bare `let _ =` throws the result away: a call that can fail hides its error, and a reader cannot tell a deliberate discard from an accidental one."
+)]
+#[case::direct_rng(
+    Rule::DirectRng,
+    "Directly constructed randomness is unauditable: a failure or an attack cannot be replayed, and a test cannot pin what the code draws."
+)]
 #[case::em_dash(
     Rule::EmDash,
     "Comments and documentation should read like an engineer's notes. An em-dash usually joins two thoughts that belong in separate sentences or points."
@@ -37,6 +45,10 @@ fn every_rule_explains_why_how_and_what_not_to_do() {
 #[case::emoji(
     Rule::Emoji,
     "Comments and documentation should read like an engineer's notes. Emoji carry no technical information and render differently across terminals and editors."
+)]
+#[case::enum_is(
+    Rule::EnumIs,
+    "strum's `EnumIs` generates `.is_variant()` shortcuts, the same absorption hazard as `matches!`: when a variant is added, every check keeps compiling and silently answers false."
 )]
 #[case::feature_flags(
     Rule::FeatureFlags,
@@ -58,6 +70,10 @@ fn every_rule_explains_why_how_and_what_not_to_do() {
     Rule::ItemSpacing,
     "Imports form one contiguous block, so rustfmt sorts them as one group and a reader sees every dependency in one place."
 )]
+#[case::json_macro(
+    Rule::JsonMacro,
+    "`json!` builds a `serde_json::Value` with no definition behind it, so the compiler cannot check keys, value types or required fields; a shape that drifts surfaces only when the JSON is read."
+)]
 #[case::library_subscriber(
     Rule::LibrarySubscriber,
     "Only the final program knows where logs go and at what level. A library that installs a subscriber fights the program's own setup, and a process can have only one global subscriber."
@@ -65,6 +81,10 @@ fn every_rule_explains_why_how_and_what_not_to_do() {
 #[case::malformed_exemption(
     Rule::MalformedExemption,
     "An exemption must name exactly which rule it lifts and why, so a reviewer can judge it. A malformed exemption exempts nothing."
+)]
+#[case::matches_macro(
+    Rule::MatchesMacro,
+    "On a compiler-exhaustive enum, `matches!` answers one question and silently absorbs every variant it does not name: adding a variant keeps this code compiling, now wrongly answering false."
 )]
 #[case::member_version(
     Rule::MemberVersion,
@@ -82,6 +102,10 @@ fn every_rule_explains_why_how_and_what_not_to_do() {
     Rule::PathAttr,
     "`#[path]` overrides Rust's file-name-to-module mapping, so a module can live anywhere and the module tree stops mirroring the file system."
 )]
+#[case::regex_use(
+    Rule::RegexUse,
+    "A regular expression is an open-ended security boundary: alternation, mode flags, repetition and character classes accept input shapes the author did not prove out, and defenses against overpermissive patterns are a treadmill."
+)]
 #[case::rest_pattern(
     Rule::RestPattern,
     "`..` matches every field the pattern does not name, including fields added later."
@@ -89,6 +113,10 @@ fn every_rule_explains_why_how_and_what_not_to_do() {
 #[case::restricted_visibility(
     Rule::RestrictedVisibility,
     "`pub(crate)`, `pub(super)` and `pub(in path)` exist to let code outside an item's own module subtree reach into it."
+)]
+#[case::system_time_now(
+    Rule::SystemTimeNow,
+    "A direct `now()` makes the code non-deterministic: a test cannot control the clock, so behavior depending on time cannot be tested or replayed."
 )]
 #[case::syntax_error(
     Rule::SyntaxError,

@@ -66,3 +66,28 @@ fn messages_name_the_code_point(#[case] text: &str, #[case] expected: &[&str]) {
         .collect();
     assert_eq!(messages, expected);
 }
+
+/// - Each hit in `text` as `offset rule`, with `listed` as the whole word list.
+/// - A listed word fires only on text of its exact case, as a whole word.
+/// - A possessive of a listed word is still the listed word: the apostrophe bounds it.
+#[rstest]
+#[case::the_listed_spelling_fires(&["behaviour"], "the behaviour of", &["4 forbidden_word"])]
+#[case::the_possessive_of_a_listed_word_fires(&["behaviour"], "the behaviour's", &["4 forbidden_word"])]
+#[case::the_other_case_stays_silent(&["behaviour"], "Behaviour differs", &[])]
+#[case::the_american_spelling_stays_silent(&["behaviour", "behavioural"], "its behavior", &[])]
+#[case::no_substring_hits(&["grey"], "greyhound", &[])]
+#[case::a_derived_form_is_a_different_word(&["centre"], "centred on", &[])]
+#[case::a_plural_is_a_different_word(&["LLM"], "three LLMs", &[])]
+#[case::the_listed_plural_fires(&["LLM", "LLMs"], "three LLMs", &["6 forbidden_word"])]
+#[case::a_proper_noun_fires_as_written(&["GPT"], "ask GPT", &["4 forbidden_word"])]
+fn seed_word_classes_match_their_exact_case_as_whole_words(
+    #[case] listed: &[&str],
+    #[case] text: &str,
+    #[case] expected: &[&str],
+) {
+    let hits: Vec<String> = forbidden(&[Piece { offset: 0, text }], &words(listed))
+        .iter()
+        .map(|hit| format!("{} {}", hit.offset, hit.rule.name()))
+        .collect();
+    assert_eq!(hits, expected);
+}

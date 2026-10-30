@@ -72,6 +72,18 @@ pub fn path_value(pair: &ast::KeyValueMeta) -> Option<ast::Expr> {
         .and(pair.expr())
 }
 
+/// - The segment names of a path joined with `::`, so a message stays one line whatever
+///   whitespace or comments the path holds.
+/// - Generic arguments and a `<T as Trait>` qualifier are left out.
+/// - Shared by `subscriber` and `banned`, which name the symbol a finding sits at.
+pub fn shown_path(path: &ast::Path) -> String {
+    path.segments()
+        .filter_map(|segment| segment.name_ref())
+        .map(|name| name.text().to_string())
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
 /// - The `mod` items among `items`, the one module-item filter.
 /// - Shared by the module walk, which follows them, and `module_shape`, which reports them.
 /// - Exhaustive on purpose: a new `ast::Item` variant forces a decision here.

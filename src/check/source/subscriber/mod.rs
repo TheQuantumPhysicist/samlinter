@@ -1,8 +1,8 @@
 use crate::config::Config;
 use crate::finding::{Hit, Rule};
-use crate::syntax::{has_test_attribute, is_test_gated};
+use crate::syntax::shown_path;
 use crate::workspace::{Package, PackageKind, Section};
-use ra_ap_syntax::{AstNode, SyntaxNode, WalkEvent, ast};
+use ra_ap_syntax::{AstNode, SyntaxNode, ast};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -84,44 +84,10 @@ fn same_crate_name(first: &str, second: &str) -> bool {
 pub fn check(root: &SyntaxNode, installs: Installs) -> Vec<Hit> {
     match installs {
         Installs::Allowed => Vec::new(),
-        Installs::Flagged => outside_test_code(root),
+        Installs::Flagged => super::outside_test_code(root, |node| {
+            ast::CallableExpr::cast(node.clone()).and_then(|call| install(&call))
+        }),
     }
-}
-
-/// What the walk does at one node.
-enum Visit {
-    /// Test-gated or a test function: skipped with everything inside.
-    TestCode,
-    Call(ast::CallableExpr),
-    Other,
-}
-
-impl Visit {
-    /// Reads only `node`'s own attributes, so each node costs as many steps as it has.
-    fn of(node: SyntaxNode) -> Self {
-        if is_test_gated(&node) || has_test_attribute(&node) {
-            Self::TestCode
-        } else {
-            ast::CallableExpr::cast(node).map_or(Self::Other, Self::Call)
-        }
-    }
-}
-
-/// One preorder walk, linear in the tree: a test subtree is skipped whole, not checked per call.
-fn outside_test_code(root: &SyntaxNode) -> Vec<Hit> {
-    let mut walk = root.preorder();
-    let mut hits = Vec::new();
-    while let Some(event) = walk.next() {
-        match event {
-            WalkEvent::Enter(node) => match Visit::of(node) {
-                Visit::TestCode => walk.skip_subtree(),
-                Visit::Call(call) => hits.extend(install(&call)),
-                Visit::Other => {}
-            },
-            WalkEvent::Leave(_) => {}
-        }
-    }
-    hits
 }
 
 /// The finding for `call` when it installs a subscriber.
@@ -150,17 +116,6 @@ fn install(call: &ast::CallableExpr) -> Option<Hit> {
 
 fn named(name: &ast::NameRef, names: &[&str]) -> bool {
     names.iter().any(|install| name.text() == *install)
-}
-
-/// - The segment names joined with `::`, so the message stays one line whatever whitespace or
-///   comments the path holds.
-/// - Generic arguments and a `<T as Trait>` qualifier are left out.
-fn shown_path(path: &ast::Path) -> String {
-    path.segments()
-        .filter_map(|segment| segment.name_ref())
-        .map(|name| name.text().to_string())
-        .collect::<Vec<_>>()
-        .join("::")
 }
 
 #[cfg(test)]

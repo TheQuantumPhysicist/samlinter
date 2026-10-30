@@ -46,21 +46,28 @@ impl Guidance {
     pub const fn of(rule: Rule) -> Self {
         let text = match rule {
             Rule::BinaryReadme => BINARY_README,
+            Rule::DiscardedResult => DISCARDED_RESULT,
+            Rule::DirectRng => DIRECT_RNG,
             Rule::EmDash => EM_DASH,
             Rule::Emoji => EMOJI,
+            Rule::EnumIs => ENUM_IS,
             Rule::FeatureFlags => FEATURE_FLAGS,
             Rule::FnSpacing => FN_SPACING,
             Rule::ForbiddenWord => FORBIDDEN_WORD,
             Rule::ItemOrder => ITEM_ORDER,
             Rule::ItemSpacing => ITEM_SPACING,
+            Rule::JsonMacro => JSON_MACRO,
             Rule::LibrarySubscriber => LIBRARY_SUBSCRIBER,
             Rule::MalformedExemption => MALFORMED_EXEMPTION,
+            Rule::MatchesMacro => MATCHES_MACRO,
             Rule::MemberVersion => MEMBER_VERSION,
             Rule::ModuleShape => MODULE_SHAPE,
             Rule::PanicStrategy => PANIC_STRATEGY,
             Rule::PathAttr => PATH_ATTR,
+            Rule::RegexUse => REGEX_USE,
             Rule::RestPattern => REST_PATTERN,
             Rule::RestrictedVisibility => RESTRICTED_VISIBILITY,
+            Rule::SystemTimeNow => SYSTEM_TIME_NOW,
             Rule::SyntaxError => SYNTAX_ERROR,
             Rule::UnfulfilledExemption => UNFULFILLED_EXEMPTION,
             Rule::WorkspaceDependencyForm => WORKSPACE_DEPENDENCY_FORM,
@@ -105,6 +112,36 @@ const BINARY_README: Text = Text {
     ],
 };
 
+const DISCARDED_RESULT: Text = Text {
+    why: &[
+        "A bare `let _ =` throws the result away: a call that can fail hides its error, and a reader cannot tell a deliberate discard from an accidental one.",
+        "The stated reason is the whole mechanism: writing why the discard is safe forces the decision and leaves the evidence for the reviewer.",
+    ],
+    fix: &[
+        "Handle the result: propagate it (`?`), match on it, or log what happened.",
+        "When discarding is genuinely safe, add a comment on the same line or the line directly above stating why it is safely discarded.",
+    ],
+    bad_fixes: &[
+        "Do not switch the call to `.ok()`, `.unwrap_or_default()` or an `ignore()` method; the result is still discarded, just out of this rule's sight.",
+    ],
+};
+
+const DIRECT_RNG: Text = Text {
+    why: &[
+        "Directly constructed randomness is unauditable: a failure or an attack cannot be replayed, and a test cannot pin what the code draws.",
+        "The project routes randomness through `randomness::make_true_rng()` and `make_pseudo_rng()` and seeds tests through the test-utils harness, so every draw traces to a generator someone chose.",
+    ],
+    fix: &[
+        "Get RNGs from randomness::make_true_rng() / make_pseudo_rng(); seed tests via the test-utils harness.",
+        "A sanctioned construction, such as the `randomness` crate's own, carries one exemption with the project owner's approval: `#[cfg_attr(samlinter, expect(direct_rng, reason = \"<the sanctioned construction>\"))]`.",
+        "Matched by name with no type information: the rule is a tripwire for constructors and free functions, not a proof. A trait-method call such as `rng.gen()` is not flagged.",
+    ],
+    bad_fixes: &[
+        "Do not seed a directly constructed generator with a constant to make it reproducible; reproducibility comes from the injected generator.",
+        "Do not wrap the construction in a helper beside the caller; the call is still flagged.",
+    ],
+};
+
 const EM_DASH: Text = Text {
     why: &[
         "Comments and documentation should read like an engineer's notes. An em-dash usually joins two thoughts that belong in separate sentences or points.",
@@ -129,6 +166,19 @@ const EMOJI: Text = Text {
         "Do not substitute a text symbol that plays the same role, such as a check mark or a cross; write the word.",
         "Do not append a VS15 (U+FE0E) to force the text form; the symbol still stands in for a word.",
         "Do not exempt the comment instead of rewriting it; an exemption is no substitute for fixing prose.",
+    ],
+};
+
+const ENUM_IS: Text = Text {
+    why: &[
+        "strum's `EnumIs` generates `.is_variant()` shortcuts, the same absorption hazard as `matches!`: when a variant is added, every check keeps compiling and silently answers false.",
+    ],
+    fix: &[
+        "Drop EnumIs; use an exhaustive match or a strum derive that forces a decision, such as a match on an `EnumDiscriminants` companion.",
+        "Only for open-ended or foreign input, exempt the site with the project owner's approval: `#[cfg_attr(samlinter, expect(enum_is, reason = \"<why>\"))]`.",
+    ],
+    bad_fixes: &[
+        "Do not replace `.is_variant()` with a `matches!` check or a catch-all arm; they absorb new variants the same way.",
     ],
 };
 
@@ -161,6 +211,9 @@ const FORBIDDEN_WORD: Text = Text {
     why: &[
         "The project lists this word or phrase under `forbidden-words` in samlinter.toml because it must not appear in comments or README files.",
         "Typical entries name documents that readers of the code do not have, refer to the tools used to write the code, or are filler phrases. A comment that points at a document nobody else can open explains nothing.",
+        "Some entries enforce a language rule of the project, such as spelling that must stay American.",
+        "Matching is exact-case: an entry only fires on text of its own case, so a capitalized sentence start escapes a lowercase entry.",
+        "A possessive of a listed word fires too: the apostrophe only bounds the word, and the possessive of a forbidden spelling is still forbidden.",
     ],
     fix: &[
         "State the reasoning itself: the constraint, decision or invariant the reference stood for.",
@@ -202,6 +255,21 @@ const ITEM_SPACING: Text = Text {
     ],
 };
 
+const JSON_MACRO: Text = Text {
+    why: &[
+        "`json!` builds a `serde_json::Value` with no definition behind it, so the compiler cannot check keys, value types or required fields; a shape that drifts surfaces only when the JSON is read.",
+        "A struct with serde derives gives the same JSON a name, one home, and compile-checked fields.",
+    ],
+    fix: &[
+        "Define a typed struct with serde derives (`Serialize`, `Deserialize`) and build or parse that; `json!` only in tests or one justified use.",
+        "Tests may keep `json!`: an expectation there is data, and a drift fails the test.",
+    ],
+    bad_fixes: &[
+        "Do not build the JSON by concatenating strings; that stays untyped and adds injection to it.",
+        "Do not assemble a `Value` field by field; it is the same untyped value under another name.",
+    ],
+};
+
 const LIBRARY_SUBSCRIBER: Text = Text {
     why: &[
         "Only the final program knows where logs go and at what level. A library that installs a subscriber fights the program's own setup, and a process can have only one global subscriber.",
@@ -222,7 +290,7 @@ const LIBRARY_SUBSCRIBER: Text = Text {
 const MALFORMED_EXEMPTION: Text = Text {
     why: &[
         "An exemption must name exactly which rule it lifts and why, so a reviewer can judge it. A malformed exemption exempts nothing.",
-        "Every rule with findings in Rust source accepts an exemption on the node that holds the finding: `rest_pattern`, `restricted_visibility`, `item_order`, `item_spacing`, `fn_spacing`, `em_dash`, `emoji`, `forbidden_word`, `library_subscriber`, `path_attr` and `module_shape`. Of the manifest rules, `member_version` (keyed by dependency) and `feature_flags` (keyed by the `[features]` table or an optional dependency's name) do. Syntax errors and the exemption rules never do, so an exemption cannot hide itself.",
+        "Every rule with findings in Rust source accepts an exemption on the node that holds the finding: `rest_pattern`, `restricted_visibility`, `item_order`, `item_spacing`, `fn_spacing`, `em_dash`, `emoji`, `forbidden_word`, `json_macro`, `library_subscriber`, `path_attr`, `module_shape`, `matches_macro`, `enum_is`, `system_time_now`, `regex_use` and `direct_rng`. Of the manifest rules, `member_version` (keyed by dependency) and `feature_flags` (keyed by the `[features]` table or an optional dependency's name) do. Syntax errors and the exemption rules never do, so an exemption cannot hide itself.",
         "Comment rule findings in Cargo.toml, samlinter.toml and README files cannot be exempted: no attribute can sit there. Neither can a Rust comment that belongs to no node.",
     ],
     fix: &[
@@ -235,6 +303,21 @@ const MALFORMED_EXEMPTION: Text = Text {
     bad_fixes: &[
         "Do not add or keep an exemption without the project owner's approval.",
         "Do not write a vague reason such as `needed`, `temporary` or `legacy`; name the concrete case.",
+    ],
+};
+
+const MATCHES_MACRO: Text = Text {
+    why: &[
+        "On a compiler-exhaustive enum, `matches!` answers one question and silently absorbs every variant it does not name: adding a variant keeps this code compiling, now wrongly answering false.",
+        "An exhaustive `match` forces the build to fail when a variant is added, so every site decides what the variant means.",
+    ],
+    fix: &[
+        "Use an exhaustive match; matches! only on open-ended or foreign input, exempted with a reason.",
+        "Only for open-ended input (raw bytes or strings, parsed JSON, `#[non_exhaustive]` foreign types), exempt the site with the project owner's approval: `#[cfg_attr(samlinter, expect(matches_macro, reason = \"<what it absorbs>\"))]`, and cover the absorbed cases with tests.",
+    ],
+    bad_fixes: &[
+        "Do not swap in an `if let` that skips the other cases or a `_ =>` arm; they absorb new variants the same way.",
+        "Do not exempt a closed enum defined in this workspace; write the match.",
     ],
 };
 
@@ -285,6 +368,21 @@ const PATH_ATTR: Text = Text {
     ],
 };
 
+const REGEX_USE: Text = Text {
+    why: &[
+        "A regular expression is an open-ended security boundary: alternation, mode flags, repetition and character classes accept input shapes the author did not prove out, and defenses against overpermissive patterns are a treadmill.",
+    ],
+    fix: &[
+        "Replace with explicit length + allowed-character + structural checks; regex only with recorded consent.",
+        "Write the shape as a named predicate: an explicit length bound, a named allowed-character set, and structural validation of the parts.",
+        "With the project owner's recorded consent, exempt the site: `#[cfg_attr(samlinter, expect(regex_use, reason = \"<who consented, and to what>\"))]`.",
+    ],
+    bad_fixes: &[
+        "Do not switch to a regex look-alike crate or a hand-rolled scanner that still accepts unbounded input; the boundary is the same.",
+        "Do not put the crate behind a feature flag.",
+    ],
+};
+
 const REST_PATTERN: Text = Text {
     why: &[
         "`..` matches every field the pattern does not name, including fields added later.",
@@ -316,6 +414,21 @@ const RESTRICTED_VISIBILITY: Text = Text {
     bad_fixes: &[
         "Do not swap in `pub` and then mark modules on the path `pub mod` until it compiles; that flattens the hierarchy until everything reaches everything.",
         "Do not merge modules or pile code into one file to dodge visibility; the module tree should mirror the dependency graph.",
+    ],
+};
+
+const SYSTEM_TIME_NOW: Text = Text {
+    why: &[
+        "A direct `now()` makes the code non-deterministic: a test cannot control the clock, so behavior depending on time cannot be tested or replayed.",
+        "Time is injected through the project's Time wrapper, so tests control the clock and every read of the real clock sits in one reviewed place.",
+    ],
+    fix: &[
+        "Inject time via the Time wrapper; read the real clock only inside the wrapper.",
+        "The Time wrapper's own clock read carries one exemption with the project owner's approval: `#[cfg_attr(samlinter, expect(system_time_now, reason = \"<the sanctioned read>\"))]`.",
+    ],
+    bad_fixes: &[
+        "Do not pass a captured `now()` value down through parameters instead; the caller still reads the real clock, now hidden.",
+        "Do not wrap the call in a helper beside the caller; the read is still flagged.",
     ],
 };
 

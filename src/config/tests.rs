@@ -1,5 +1,8 @@
 use super::{ExcludeEntry, Settings, Word, words};
 use rstest::rstest;
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::Path;
 
 #[test]
 fn parses_every_required_key() {
@@ -128,4 +131,63 @@ fn rejects_invalid_config(#[case] text: &str, #[case] expected: &str) {
 )]
 fn rejects_empty_or_padded_entries(#[case] text: &str, #[case] expected: &str) {
     assert_eq!(Settings::parse(text).unwrap_err().to_string(), expected);
+}
+
+/// The word classes this workspace's code rules enforce, spelled exactly as they must match.
+#[rstest]
+#[case::document_names_a_reader_cannot_open(&[
+    "RULES.md", "CODEMAP.md", "AGENTS.md", "HANDOFF.md", "TRACKS.md", "INVARIANTS.md",
+    "DESIGN.md", "CLAUDE.md",
+])]
+#[case::the_tools_used_to_write_the_code(&[
+    "Claude", "Anthropic", "OpenAI", "ChatGPT", "GPT", "Copilot", "AI", "LLM", "LLMs",
+])]
+#[case::spellings_that_must_stay_american(&[
+    "behaviour", "behavioural", "initialise", "initialised", "initialising",
+    "colour", "colourful", "favour", "favourable", "labour", "honour",
+    "analyse", "analysed", "analysing", "optimise", "optimised", "optimising",
+    "licence", "defence", "offence", "centre", "metre", "grey", "catalogue",
+])]
+fn the_seed_list_carries_the_enforced_word_classes(#[case] enforced: &[&str]) {
+    let owned = repo_forbidden_words();
+    let listed: BTreeSet<&str> = owned.iter().map(String::as_str).collect();
+    let missing: Vec<&str> = enforced
+        .iter()
+        .copied()
+        .filter(|word| !listed.contains(word))
+        .collect();
+    assert_eq!(missing, Vec::<&str>::new());
+}
+
+/// The forbidden-word list parsed from this repo's own samlinter.toml.
+fn repo_forbidden_words() -> Vec<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("samlinter.toml");
+    let text = fs::read_to_string(path).unwrap();
+    Settings::parse(&text)
+        .unwrap()
+        .config
+        .forbidden_words
+        .iter()
+        .map(|word| word.as_str().to_owned())
+        .collect()
+}
+
+/// - The forms the seed list deliberately omits: a future addition must restart the
+///   policy conversation, not slip in.
+/// - Possessives need no entry (the matcher already reaches the listed word inside one)
+///   and `cancelled` needs none (the doubled-l spelling is valid American too).
+#[test]
+fn the_seed_list_omits_the_ruled_out_forms() {
+    let listed = repo_forbidden_words();
+    for word in ["cancelled", "cancelling"] {
+        assert!(
+            !listed.iter().any(|entry| entry == word),
+            "`{word}` entered the list"
+        );
+    }
+    let possessives: Vec<&String> = listed
+        .iter()
+        .filter(|entry| entry.ends_with("'s") || entry.ends_with("s'"))
+        .collect();
+    assert_eq!(possessives, Vec::<&String>::new());
 }

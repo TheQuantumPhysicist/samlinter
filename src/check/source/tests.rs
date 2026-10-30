@@ -11,7 +11,7 @@ const PHRASE: &str = "it is worth noting";
 fn findings_in(edition: Edition, installs: Installs, kind: FileKind, text: &str) -> Vec<String> {
     let file = text_file("src/lib.rs", text);
     let config = Config {
-        forbidden_words: words(&["NOTES.md", PHRASE]),
+        forbidden_words: words(&["NOTES.md", "AGENTS.md", "GPT", PHRASE]),
         subscriber_crates: Vec::new(),
     };
     check(&file, edition, &config, installs, kind)
@@ -88,6 +88,14 @@ fn file_with_syntax_errors_is_reported_not_linted(#[case] text: &str, #[case] ex
 #[case::inner_block_doc_comment(
     "/*! see NOTES.md */\n",
     &["src/lib.rs:1:9: forbidden_word: `NOTES.md` is listed in forbidden-words in samlinter.toml"]
+)]
+#[case::line_comment_names_a_document(
+    "// see AGENTS.md\nfn f() {}\n",
+    &["src/lib.rs:1:8: forbidden_word: `AGENTS.md` is listed in forbidden-words in samlinter.toml"]
+)]
+#[case::doc_comment_names_a_tool(
+    "/// fixed by GPT\nfn f() {}\n",
+    &["src/lib.rs:1:14: forbidden_word: `GPT` is listed in forbidden-words in samlinter.toml"]
 )]
 #[case::string_literal_is_not_a_comment("const S: &str = \"NOTES.md \u{2014}\";\n", &[])]
 fn scans_comments_not_string_literals(#[case] text: &str, #[case] expected: &[&str]) {
