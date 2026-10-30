@@ -8,8 +8,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use cargo_metadata::{DependencyKind, Metadata, MetadataCommand, TargetKind};
 pub use lookup::Excluded;
 use lookup::{Disk, FileAt, Files, Looked, lexical, look, relative};
-pub use modules::FileKind;
-use modules::{Candidate, Declaration, Directory};
+use modules::{Candidate, Declaration, Directory, RouteCode};
+pub use modules::{FileKind, TestCode};
 use ownership::owned_sources;
 use ra_ap_syntax::Edition;
 use std::collections::btree_map::Entry;
@@ -64,14 +64,18 @@ struct Source {
     /// The file kind of every route that reached it, merged by `FileKind::either`: a
     /// `NonModRs` route makes it `NonModRs`.
     kind: FileKind,
-    reach: Reach,
+    /// What every route that reached it says, merged by `RouteCode::either`: one route that
+    /// lints the file keeps it linted.
+    code: RouteCode,
 }
 
 /// A Rust source file the package owns, with the file kind every route to it agrees on: a
-/// `NonModRs` route (`something.rs`, not `something/mod.rs`) makes it `NonModRs`.
+/// `NonModRs` route (`something.rs`, not `something/mod.rs`) makes it `NonModRs`. `test`
+/// says whether every route reaches it as test code, whole-file.
 pub struct SourceFile {
     pub file: TextFile,
     pub kind: FileKind,
+    pub test: TestCode,
 }
 
 /// Whether a source file's code can end up in its package's library.
@@ -213,6 +217,8 @@ struct Target {
     root: PathBuf,
     /// What the target's own code is to the library.
     reach: Reach,
+    /// `Test` for a test target: its root file is test code whole-file.
+    test: TestCode,
 }
 
 /// - One way the module tree reaches a file; the file's `mod` declarations resolve against it.
@@ -293,8 +299,9 @@ enum PackageWalk {
     NotFollowed(Warning),
 }
 
-pub fn load(manifest_path: Option<&Path>) -> Result<Workspace> {
-    let metadata = metadata(manifest_path)?;
+pub fn load(manifest_path: Option<&Path>, directory: Option<&Path>) -> Result<Workspace> {
+    let directory = directory.map(starting_directory).transpose()?;
+    let metadata = metadata(manifest_path, directory.as_deref())?;
     let workspace_root = metadata.workspace_root.as_std_path();
     let packages = metadata
         .workspace_packages()
@@ -304,13 +311,41 @@ pub fn load(manifest_path: Option<&Path>) -> Result<Workspace> {
     assemble(&Disk, workspace_root, packages)
 }
 
-fn metadata(manifest_path: Option<&Path>) -> Result<Metadata> {
+/// - `cargo metadata` decides the workspace root, so the run's root moves by running it in
+///   `directory`: a relative `--manifest-path` resolves under it, and with no manifest the
+///   workspace is found from it, as `cargo` does from the working directory.
+fn metadata(manifest_path: Option<&Path>, directory: Option<&Path>) -> Result<Metadata> {
     let mut command = MetadataCommand::new();
     command.no_deps();
     if let Some(path) = manifest_path {
         command.manifest_path(path);
     }
+    if let Some(directory) = directory {
+        command.current_dir(directory);
+    }
     command.exec().context("`cargo metadata` failed")
+}
+
+/// - The directory the run starts in, as an absolute path for `cargo metadata`'s cwd.
+/// - A relative DIR resolves against the process cwd, the only place the cwd is consulted.
+/// - DIR is taken as given, like the workspace root: `fs::metadata` follows a symlink, so a
+///   link to a directory starts the run and a link to a file is not a directory.
+fn starting_directory(directory: &Path) -> Result<PathBuf> {
+    let absolute = if directory.is_relative() {
+        std::env::current_dir()
+            .with_context(|| format!("cannot resolve the directory {}", directory.display()))?
+            .join(directory)
+    } else {
+        directory.to_path_buf()
+    };
+    match std::fs::metadata(&absolute) {
+        Ok(metadata) if metadata.is_dir() => Ok(absolute),
+        Ok(_) => bail!("{}: not a directory", directory.display()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            bail!("{}: no such file or directory", directory.display())
+        }
+        Err(error) => bail!("{}: {error}", directory.display()),
+    }
 }
 
 /// One package `cargo metadata` reports; an error names its manifest as output shows it.
@@ -329,6 +364,7 @@ fn package_metadata(root_dir: &Path, package: &cargo_metadata::Package) -> Resul
             .map(|target| Target {
                 root: target.src_path.as_std_path().to_path_buf(),
                 reach: target_reach(&target.kind),
+                test: target_test(&target.kind),
             })
             .collect(),
         manifest_path,
@@ -453,7 +489,10 @@ fn target_root(
             Child {
                 file,
                 kind: FileKind::ModRs,
-                reach: target.reach,
+                code: RouteCode {
+                    reach: target.reach,
+                    test: target.test,
+                },
             },
         ),
         Looked::Excluded => Ok(tree),
@@ -546,7 +585,8 @@ fn config(files: &impl Files, root_dir: &Path) -> Result<TextFile> {
 }
 
 /// A file several routes reach is linted once, ordered by its path, as library code when any
-/// route reaches it as such, and by the shape any route gives it.
+/// route reaches it as such, by the shape any route gives it, and test-silent when every
+/// route reaches it as test code.
 fn one_per_file(sources: Sources) -> Vec<Source> {
     let by_path =
         sources
@@ -558,8 +598,8 @@ fn one_per_file(sources: Sources) -> Vec<Source> {
                     }
                     Entry::Occupied(mut slot) => {
                         let kept = slot.get_mut();
-                        kept.reach = kept.reach.either(source.reach);
                         kept.kind = kept.kind.either(source.kind);
+                        kept.code = kept.code.either(source.code);
                     }
                 }
                 by_path
@@ -578,7 +618,8 @@ fn edition(manifest_path: &Path, edition: &str) -> Result<Edition> {
 
 /// - `tree` plus the `child` file and every file its `mod` declarations reach along this route.
 /// - A route followed only as `Reach::NotLibrary` so far is followed again as library code
-///   when a library route reaches it, so the files below it become library code too.
+///   when a library route reaches it, so the files below it become library code too; a file
+///   followed only as `TestCode::Test` is followed again as `TestCode::NotTest` the same way.
 fn module_tree(
     files: &impl Files,
     root_dir: &Path,
@@ -591,14 +632,18 @@ fn module_tree(
         mut sources,
         warnings,
     } = tree;
-    let Child { file, kind, reach } = child;
+    let Child { file, kind, code } = child;
     let children = match sources.entry(Route::of(root_dir, file.path(), kind)?) {
-        Entry::Occupied(mut slot) => match (slot.get().reach, reach) {
-            // Followed already, along with the files below it.
-            (Reach::Library, Reach::Library | Reach::NotLibrary)
-            | (Reach::NotLibrary, Reach::NotLibrary) => Children::default(),
-            (Reach::NotLibrary, Reach::Library) => {
-                slot.get_mut().reach = Reach::Library;
+        Entry::Occupied(mut slot) => {
+            let walked = slot.get().code;
+            // The first walk read this file and followed its declarations along its own route.
+            // Follow them again only when this route reaches the files below as something that
+            // walk did not: library code, or linted instead of test code. Reading the trigger
+            // off the merged route keeps it from drifting from what the merge decides.
+            let merged = walked.either(code);
+            let follows = merged != walked;
+            slot.get_mut().code = merged;
+            if follows {
                 let route = slot.key();
                 child_files(
                     files,
@@ -607,10 +652,12 @@ fn module_tree(
                     route,
                     &slot.get().file,
                     edition,
-                    reach,
+                    code,
                 )?
+            } else {
+                Children::default()
             }
-        },
+        }
         Entry::Vacant(slot) => {
             let source = read_file(files, root_dir, file)?;
             let children = child_files(
@@ -620,12 +667,12 @@ fn module_tree(
                 slot.key(),
                 &source,
                 edition,
-                reach,
+                code,
             )?;
             slot.insert(Source {
                 file: source,
                 kind,
-                reach,
+                code,
             });
             children
         }
@@ -692,7 +739,7 @@ impl Children {
 }
 
 /// - The files the `mod` declarations in `source` name, every existing candidate of each.
-/// - `reach` is the route's; each child's is that through its declaration.
+/// - `code` is what the route says about them; each child's is that through its declaration.
 fn child_files(
     files: &impl Files,
     root_dir: &Path,
@@ -700,7 +747,7 @@ fn child_files(
     route: &Route,
     source: &TextFile,
     edition: Edition,
-    reach: Reach,
+    code: RouteCode,
 ) -> Result<Children> {
     let shown = &source.shown;
     let declarations = modules::declarations(&source.text, edition).map_err(|bad| {
@@ -714,7 +761,7 @@ fn child_files(
     declarations
         .iter()
         .try_fold(Children::default(), |children, declaration| {
-            let resolution = look_up(files, root_dir, excluded, route, declaration, reach)?
+            let resolution = look_up(files, root_dir, excluded, route, declaration, code)?
                 .into_iter()
                 .fold(Resolution::Missing(Vec::new()), Resolution::with);
             children.with(root_dir, shown, declaration, resolution)
@@ -725,8 +772,8 @@ fn child_files(
 struct Child {
     file: FileAt,
     kind: FileKind,
-    /// The reach of the route through it.
-    reach: Reach,
+    /// What the route through it says about the file.
+    code: RouteCode,
 }
 
 /// One candidate file of a `mod` declaration, once looked up.
@@ -779,16 +826,16 @@ impl Resolution {
     }
 }
 
-/// Each candidate file of `declaration`, found along `route` of reach `reach`, looked up.
+/// Each candidate file of `declaration`, found along `route` whose code is `code`, looked up.
 fn look_up(
     files: &impl Files,
     root_dir: &Path,
     excluded: &Excluded,
     route: &Route,
     declaration: &Declaration,
-    reach: Reach,
+    code: RouteCode,
 ) -> Result<Vec<Lookup>> {
-    let reach = reach.through(declaration.reach);
+    let code = code.through(declaration.test);
     let candidates =
         modules::candidates(&route.dir, &route.name, route.kind, declaration, |dir| {
             Ok(match look(files, root_dir, excluded, dir)? {
@@ -803,13 +850,13 @@ fn look_up(
             let Candidate {
                 path,
                 kind,
-                reach: location,
+                test: location,
             } = candidate;
             Ok(match look(files, root_dir, excluded, &path)? {
                 Looked::File(file) => Lookup::Found(Child {
                     file,
                     kind,
-                    reach: reach.through(location),
+                    code: code.through(location),
                 }),
                 Looked::Directory(_) | Looked::Neither => Lookup::Missing(path),
                 Looked::Excluded => Lookup::Excluded,
@@ -864,6 +911,15 @@ fn target_reach(kinds: &[TargetKind]) -> Reach {
     }
 }
 
+/// A test target's root file is test code whole-file; any other target's is not.
+fn target_test(kinds: &[TargetKind]) -> TestCode {
+    if kinds.iter().any(is_test_kind) {
+        TestCode::Test
+    } else {
+        TestCode::NotTest
+    }
+}
+
 const fn is_library_kind(kind: &TargetKind) -> bool {
     match kind {
         TargetKind::Bin
@@ -881,6 +937,26 @@ const fn is_library_kind(kind: &TargetKind) -> bool {
         | TargetKind::ProcMacro
         | TargetKind::Unknown(_)
         | _ => true,
+    }
+}
+
+const fn is_test_kind(kind: &TargetKind) -> bool {
+    match kind {
+        TargetKind::Test => true,
+        // `#[non_exhaustive]`: the wildcard absorbs kinds newer than this cargo_metadata, read
+        // as not test code, so a new kind never hides a finding.
+        TargetKind::Bin
+        | TargetKind::Example
+        | TargetKind::Bench
+        | TargetKind::CustomBuild
+        | TargetKind::Lib
+        | TargetKind::RLib
+        | TargetKind::DyLib
+        | TargetKind::CDyLib
+        | TargetKind::StaticLib
+        | TargetKind::ProcMacro
+        | TargetKind::Unknown(_)
+        | _ => false,
     }
 }
 

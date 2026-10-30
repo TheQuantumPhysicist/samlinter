@@ -1,11 +1,17 @@
 use super::super::{hits, render};
 use super::check;
 use crate::config::Config;
+use crate::workspace::TestCode;
 use ra_ap_syntax::{AstNode, Edition};
 use rstest::rstest;
 
 fn discards(text: &str) -> Vec<String> {
-    render(text, |file| check(file.syntax(), text))
+    render(text, |file| check(file.syntax(), text, TestCode::NotTest))
+}
+
+/// `discards` for a file the walk reached as test code whole-file.
+fn discards_in_a_test_file(text: &str) -> Vec<String> {
+    render(text, |file| check(file.syntax(), text, TestCode::Test))
 }
 
 /// Every `let _ = ..;` with no comment on its own line or on the line directly above.
@@ -24,12 +30,29 @@ fn discards(text: &str) -> Vec<String> {
     "fn f() {\n    // the error cannot happen\n    let x = g();\n    let _ = h();\n}\n",
     &["4:5 discarded_result"]
 )]
-#[case::also_in_a_test_function(
-    "#[test]\nfn t() {\n    let _ = g();\n}\n",
-    &["3:5 discarded_result"]
-)]
 fn flags_discards_without_a_stated_reason(#[case] text: &str, #[case] expected: &[&str]) {
     assert_eq!(discards(text), expected);
+}
+
+/// Test code is silent, like every rule sharing `outside_test_code`: under a cfg that
+/// requires `test`, or in a test function.
+#[rstest]
+#[case::cfg_test_module("#[cfg(test)]\nmod tests {\n    fn a() { let _ = g(); }\n}\n", &[])]
+#[case::test_function("#[test]\nfn t() { let _ = g(); }\n", &[])]
+#[case::tokio_test_function("#[tokio::test]\nfn t() { let _ = g(); }\n", &[])]
+fn silent_inside_test_code(#[case] text: &str, #[case] expected: &[&str]) {
+    assert_eq!(discards(text), expected);
+}
+
+/// A file the walk reached as test code is silent whole-file, `#[test]` function or not.
+#[test]
+fn silent_in_a_test_reached_file() {
+    assert_eq!(
+        discards_in_a_test_file(
+            "fn plain() {\n    let _ = g();\n}\n\n#[test]\nfn t() {\n    let _ = g();\n}\n"
+        ),
+        Vec::<String>::new()
+    );
 }
 
 /// The stated reason is the rule's own satisfied condition: a comment on the statement's
@@ -62,7 +85,7 @@ fn silent_on_bindings_that_keep_a_handle(#[case] text: &str, #[case] expected: &
 #[test]
 fn message_names_the_discard() {
     let text = "fn f() {\n    let _ = g();\n}\n";
-    let messages: Vec<String> = hits(text, |file| check(file.syntax(), text))
+    let messages: Vec<String> = hits(text, |file| check(file.syntax(), text, TestCode::NotTest))
         .into_iter()
         .map(|hit| hit.message)
         .collect();
@@ -88,6 +111,7 @@ fn an_expect_does_not_lift_it() {
         &config,
         super::super::Installs::Allowed,
         super::super::FileKind::ModRs,
+        TestCode::NotTest,
     )
     .iter()
     .map(ToString::to_string)

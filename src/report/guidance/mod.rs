@@ -115,7 +115,7 @@ const BINARY_README: Text = Text {
 const DISCARDED_RESULT: Text = Text {
     why: &[
         "A bare `let _ =` throws the result away: a call that can fail hides its error, and a reader cannot tell a deliberate discard from an accidental one.",
-        "The stated reason is the whole mechanism: writing why the discard is safe forces the decision and leaves the evidence for the reviewer.",
+        "In code the lint reaches, the stated reason is the whole mechanism: writing why the discard is safe forces the decision and leaves the evidence for the reviewer. Test code is silent: a file only test-gated module declarations reach, code under a cfg that requires `test`, and test functions hold no product behavior to lose.",
     ],
     fix: &[
         "Handle the result: propagate it (`?`), match on it, or log what happened.",

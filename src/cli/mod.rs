@@ -6,7 +6,7 @@ pub const HELP: &str = "\
 samlinter: syntax gate for Rust workspace conventions
 
 Usage:
-  samlinter [--manifest-path <Cargo.toml>]
+  samlinter [--manifest-path <Cargo.toml>] [--directory <DIR>]
   samlinter --help | -h
   samlinter --version | -V
 
@@ -20,12 +20,18 @@ not followed: a symlink samlinter reads or enters, other than the workspace root
 and its parents, stops the run (exit 2).
 Each group ends with why the rule exists, how to fix it, and which fixes only
 hide the problem. The finding count goes to stderr.
+--directory DIR runs as if the working directory were DIR, for this run only: a relative
+--manifest-path resolves under DIR, and with no --manifest-path the workspace is found
+from DIR. The shell's working directory never changes.
 Exit status: 0 clean, 1 findings, 2 error.
 ";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
-    Check { manifest_path: Option<PathBuf> },
+    Check {
+        manifest_path: Option<PathBuf>,
+        directory: Option<PathBuf>,
+    },
     Help,
     Version,
 }
@@ -41,9 +47,30 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Command> {
     match words.as_slice() {
         [] => Ok(Command::Check {
             manifest_path: None,
+            directory: None,
         }),
         [(Some("--manifest-path"), _), (_, path)] => Ok(Command::Check {
             manifest_path: Some(PathBuf::from(path)),
+            directory: None,
+        }),
+        [(Some("--directory"), _), (_, directory)] => Ok(Command::Check {
+            manifest_path: None,
+            directory: Some(PathBuf::from(directory)),
+        }),
+        [
+            (Some("--manifest-path"), _),
+            (_, path),
+            (Some("--directory"), _),
+            (_, directory),
+        ]
+        | [
+            (Some("--directory"), _),
+            (_, directory),
+            (Some("--manifest-path"), _),
+            (_, path),
+        ] => Ok(Command::Check {
+            manifest_path: Some(PathBuf::from(path)),
+            directory: Some(PathBuf::from(directory)),
         }),
         [(Some("--help" | "-h"), _)] => Ok(Command::Help),
         [(Some("--version" | "-V"), _)] => Ok(Command::Version),

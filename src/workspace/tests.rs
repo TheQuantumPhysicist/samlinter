@@ -1,9 +1,9 @@
 use super::lookup::memory::{Content, Memory};
 use super::lookup::{Files, Unfollowed};
 use super::{
-    Package, PackageKind, PackageMetadata, Reach, Readme, Root, Section, Target, TextFile,
-    Workspace, assemble, dependencies, dependency, edition, package_metadata, section,
-    target_reach,
+    Package, PackageKind, PackageMetadata, Reach, Readme, Root, Section, Target, TestCode,
+    TextFile, Workspace, assemble, dependencies, dependency, edition, package_metadata, section,
+    target_reach, target_test,
 };
 use crate::check;
 use crate::finding::Rule;
@@ -60,15 +60,18 @@ fn load_from(
         .map(|(manifest, edition)| {
             let manifest_path = Path::new(ROOT).join(manifest);
             let targets: Vec<Target> = [
-                ("src/lib.rs", Reach::Library),
-                ("src/main.rs", Reach::NotLibrary),
-                ("build.rs", Reach::NotLibrary),
+                ("src/lib.rs", Reach::Library, TestCode::NotTest),
+                ("src/main.rs", Reach::NotLibrary, TestCode::NotTest),
+                ("build.rs", Reach::NotLibrary, TestCode::NotTest),
+                // Every `tests/*.rs` file is a test target of its own.
+                ("tests/it.rs", Reach::NotLibrary, TestCode::Test),
             ]
             .iter()
-            .filter_map(|(root, reach)| {
+            .filter_map(|(root, reach, test)| {
                 manifest_path.parent().map(|dir| Target {
                     root: dir.join(root),
                     reach: *reach,
+                    test: *test,
                 })
             })
             .filter(|target| {
@@ -731,6 +734,7 @@ fn library_targets(roots: &[&str]) -> Vec<Target> {
         .map(|root| Target {
             root: PathBuf::from(root),
             reach: Reach::Library,
+            test: TestCode::NotTest,
         })
         .collect()
 }
@@ -1533,6 +1537,25 @@ fn only_library_targets_hold_library_code(#[case] kinds: &[TargetKind], #[case] 
     assert_eq!(target_reach(kinds), expected);
 }
 
+/// A test target's root file is test code whole-file; any other target's is linted.
+#[rstest]
+#[case::test_target(&[TargetKind::Test], TestCode::Test)]
+#[case::lib_and_test(&[TargetKind::Lib, TargetKind::Test], TestCode::Test)]
+#[case::lib(&[TargetKind::Lib], TestCode::NotTest)]
+#[case::rlib(&[TargetKind::RLib], TestCode::NotTest)]
+#[case::dylib(&[TargetKind::DyLib], TestCode::NotTest)]
+#[case::cdylib(&[TargetKind::CDyLib], TestCode::NotTest)]
+#[case::staticlib(&[TargetKind::StaticLib], TestCode::NotTest)]
+#[case::proc_macro(&[TargetKind::ProcMacro], TestCode::NotTest)]
+#[case::bin(&[TargetKind::Bin], TestCode::NotTest)]
+#[case::example(&[TargetKind::Example], TestCode::NotTest)]
+#[case::bench(&[TargetKind::Bench], TestCode::NotTest)]
+#[case::build_script(&[TargetKind::CustomBuild], TestCode::NotTest)]
+#[case::unknown(&[TargetKind::Unknown("new".to_owned())], TestCode::NotTest)]
+fn only_test_targets_are_test_code(#[case] kinds: &[TargetKind], #[case] expected: TestCode) {
+    assert_eq!(target_test(kinds), expected);
+}
+
 /// Every source of each member as `<shown> <reach>`, by whether its package's library code holds
 /// it.
 fn reaches(workspace: &Workspace) -> Vec<String> {
@@ -1671,6 +1694,96 @@ fn test_only_declarations_lead_out_of_library_code(
         .map(|(path, text)| (*path, Content::Text(text)))
         .collect();
     assert_eq!(reaches(&load_p(&files).unwrap()), expected);
+}
+
+/// Every source of each member as `<shown> <test>`, by the routes that reach it.
+fn testness(workspace: &Workspace) -> Vec<String> {
+    workspace
+        .members
+        .iter()
+        .flat_map(|package| {
+            package
+                .sources
+                .iter()
+                .map(|source| format!("{} {:?}", source.file.shown.display(), source.test))
+        })
+        .collect()
+}
+
+/// - A file reached through a test-gated module declaration is test code whole-file, its own
+///   submodules included; a test target's root file is too.
+/// - The inline form stays linted code: the file itself is not test-reached.
+/// - One route that lints the file keeps it linted, the files below it included, since that
+///   route's build compiles the file whole; a `cfg_attr(test, path)` route marks the file
+///   test all the same.
+#[rstest]
+#[case::test_module_in_its_own_file(
+    &[
+        ("p/src/lib.rs", "mod a;\n\n#[cfg(test)]\nmod tests;\n"),
+        ("p/src/a.rs", ""),
+        ("p/src/tests/mod.rs", "mod helper;\n"),
+        ("p/src/tests/helper.rs", ""),
+    ],
+    &[
+        "p/src/a.rs NotTest",
+        "p/src/lib.rs NotTest",
+        "p/src/tests/helper.rs Test",
+        "p/src/tests/mod.rs Test",
+    ]
+)]
+#[case::inline_test_module_stays_linted(
+    &[("p/src/lib.rs", "#[cfg(test)]\nmod tests {\n    fn a() {}\n}\n")],
+    &["p/src/lib.rs NotTest"]
+)]
+#[case::integration_test_target(
+    &[("p/src/lib.rs", ""), ("p/tests/it.rs", "")],
+    &["p/src/lib.rs NotTest", "p/tests/it.rs Test"]
+)]
+#[case::test_only_cfg_attr_path(
+    &[
+        ("p/src/lib.rs", "#[cfg_attr(test, path = \"mock.rs\")]\nmod imp;\n"),
+        ("p/src/imp.rs", ""),
+        ("p/src/mock.rs", ""),
+    ],
+    &["p/src/imp.rs NotTest", "p/src/lib.rs NotTest", "p/src/mock.rs Test"]
+)]
+#[case::one_linting_route_keeps_the_file_linted(
+    &[
+        ("p/src/lib.rs", "#[cfg(test)]\nmod t;\n#[path = \"shared.rs\"]\nmod shared;\n"),
+        ("p/src/t.rs", "#[path = \"shared.rs\"]\nmod shared;\n"),
+        ("p/src/shared.rs", "mod child;\n"),
+        ("p/src/child.rs", ""),
+    ],
+    &[
+        "p/src/child.rs NotTest",
+        "p/src/lib.rs NotTest",
+        "p/src/shared.rs NotTest",
+        "p/src/t.rs Test",
+    ]
+)]
+#[case::the_linting_route_reaches_first(
+    &[
+        ("p/src/lib.rs", "#[path = \"shared.rs\"]\nmod shared;\n#[cfg(test)]\nmod t;\n"),
+        ("p/src/t.rs", "#[path = \"shared.rs\"]\nmod shared;\n"),
+        ("p/src/shared.rs", "mod child;\n"),
+        ("p/src/child.rs", ""),
+    ],
+    &[
+        "p/src/child.rs NotTest",
+        "p/src/lib.rs NotTest",
+        "p/src/shared.rs NotTest",
+        "p/src/t.rs Test",
+    ]
+)]
+fn test_routes_mark_test_code_whole_file(
+    #[case] files: &[(&str, &'static str)],
+    #[case] expected: &[&str],
+) {
+    let files: Vec<(&str, Content)> = files
+        .iter()
+        .map(|(path, text)| (*path, Content::Text(text)))
+        .collect();
+    assert_eq!(testness(&load_p(&files).unwrap()), expected);
 }
 
 /// A file another package owns stays the reaching library's code.

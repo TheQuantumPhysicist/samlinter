@@ -12,6 +12,7 @@ cargo install --path . --locked             # from a local checkout
 cargo install samlinter --locked            # from crates.io
 samlinter                                   # anywhere inside the workspace
 samlinter --manifest-path path/to/Cargo.toml
+samlinter --directory path/to/other/workspace
 ```
 
 - Needs `cargo` on `PATH`: the workspace layout and each package's dependencies come from
@@ -19,6 +20,9 @@ samlinter --manifest-path path/to/Cargo.toml
 - Needs `samlinter.toml` at the workspace root (see Configuration).
 - Always checks the whole workspace with the root's `samlinter.toml`, also when run from a
   member directory or given a member's `Cargo.toml`.
+- `--directory DIR` runs as if the working directory were DIR, for this run only: a relative
+  `--manifest-path` resolves under DIR, and with no `--manifest-path` the workspace is found
+  from DIR; the shell's working directory never changes.
 - Every run, `--help` and `--version` included, runs on a thread with a 256 MiB stack, so
   deeply nested files fit; if the OS refuses that stack (for example under a low
   `ulimit -v`), samlinter exits 2.
@@ -217,14 +221,19 @@ Rust sources are found the way the compiler finds them, not by listing directori
 - `json_macro`: every path form counts: `json!(..)`, `serde_json::json!(..)`, any leading path
   ending in `::json!`, in expression or item position, reported at the macro's name. A
   `json!` inside a macro body is not seen.
-- `json_macro`: silent inside test code: an item under a `#[cfg(test)]` module or function
-  (an inline module's inner `#![cfg(test)]` counts), or inside a test function, one marked
-  by an attribute whose path ends in `test` (`#[test]`, `#[tokio::test]`). Elsewhere a
-  single justified use is exempted with an expect on the function or item that holds it.
+- `json_macro`: silent inside test code: a file only test-gated `mod` declarations reach
+  (`#[cfg(test)] mod tests;` leads to `tests.rs` and everything below it) or a test target's
+  root file and everything below it, an item under a `#[cfg(test)]` module or function (an
+  inline module's inner `#![cfg(test)]` counts), or inside a test function, one marked by an
+  attribute whose path ends in `test` (`#[test]`, `#[tokio::test]`). Elsewhere a single
+  justified use is exempted with an expect on the function or item that holds it.
 - `discarded_result`: every `let _ = ..;` with an initializer. samlinter sees no types, so
   it cannot tell a fallible call from an infallible one: the workspace's code rules want a
   stated reason on every deliberate discard, and one line on a rare non-fallible discard
   is the accepted cost. A `let _ = &field;` existence assertion counts like any other.
+- `discarded_result`: silent inside test code, on the same terms as `json_macro`: a file
+  only test-gated declarations reach, an item under a cfg that requires `test`, and test
+  functions. The stated reason stays the mechanism everywhere the rule fires.
 - `discarded_result`: the comment is not an exemption attribute; it is the rule's own
   satisfied condition: a comment token on the statement's line or on the line directly
   above it. A blank line between the comment and the statement breaks adjacency, and a

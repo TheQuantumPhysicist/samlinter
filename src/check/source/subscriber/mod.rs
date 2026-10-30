@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::finding::{Hit, Rule};
 use crate::syntax::shown_path;
-use crate::workspace::{Package, PackageKind, Section};
+use crate::workspace::{Package, PackageKind, Section, TestCode};
 use ra_ap_syntax::{AstNode, SyntaxNode, ast};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -80,11 +80,12 @@ fn same_crate_name(first: &str, second: &str) -> bool {
 
 /// - `library_subscriber`: each call that installs a subscriber, at its method or function name.
 /// - Matched by name, as there is no type information; macro bodies are not seen.
-/// - Test code may install one: under a cfg that requires `test`, or in a test function.
-pub fn check(root: &SyntaxNode, installs: Installs) -> Vec<Hit> {
+/// - Test code may install one: a file the walk reached as test code whole-file, a node under
+///   a cfg that requires `test`, or a test function.
+pub fn check(root: &SyntaxNode, installs: Installs, test: TestCode) -> Vec<Hit> {
     match installs {
         Installs::Allowed => Vec::new(),
-        Installs::Flagged => super::outside_test_code(root, |node| {
+        Installs::Flagged => super::outside_test_code(root, test, |node| {
             ast::CallableExpr::cast(node.clone()).and_then(|call| install(&call))
         }),
     }

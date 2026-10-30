@@ -33,8 +33,9 @@ pub fn owned_sources(reached: ByManifest) -> BTreeMap<PathBuf, Owned> {
         .collect();
 
     // - One pass over every reached source of every package: each source joins the map of the
-    //   package that owns it, its kind merged with the entry there, so a `NonModRs` route of
-    //   any package makes the file `NonModRs` and the merged kind lives in one place.
+    //   package that owns it, its kind and route facts merged with the entry there, so a
+    //   `NonModRs` route of any package makes the file `NonModRs` and one route that lints it
+    //   keeps it linted.
     // - The package data rides along; no package's `Owned` is final until the last source is
     //   in, since a later package can own an earlier one's file.
     let mut files: BTreeMap<PathBuf, BTreeMap<PathBuf, SourceFile>> = BTreeMap::new();
@@ -56,10 +57,12 @@ pub fn owned_sources(reached: ByManifest) -> BTreeMap<PathBuf, Owned> {
                     slot.insert(SourceFile {
                         file: source.file,
                         kind: source.kind,
+                        test: source.code.test,
                     });
                 }
                 Entry::Occupied(mut slot) => {
                     slot.get_mut().kind = slot.get().kind.either(source.kind);
+                    slot.get_mut().test = slot.get().test.either(source.code.test);
                 }
             }
         }
@@ -104,7 +107,7 @@ pub fn owned_sources(reached: ByManifest) -> BTreeMap<PathBuf, Owned> {
 fn library_code(sources: &[Source]) -> BTreeSet<PathBuf> {
     sources
         .iter()
-        .filter(|source| match source.reach {
+        .filter(|source| match source.code.reach {
             Reach::Library => true,
             Reach::NotLibrary => false,
         })

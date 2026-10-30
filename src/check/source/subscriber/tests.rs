@@ -2,14 +2,16 @@ use super::super::super::text_file;
 use super::super::{hits, render};
 use super::{Gate, Installs, check};
 use crate::config::{Config, words};
-use crate::workspace::{Dependency, Package, PackageKind, Readme, Section};
+use crate::workspace::{Dependency, Package, PackageKind, Readme, Section, TestCode};
 use ra_ap_syntax::{AstNode, Edition};
 use rstest::rstest;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 fn flagged(text: &str) -> Vec<String> {
-    render(text, |file| check(file.syntax(), Installs::Flagged))
+    render(text, |file| {
+        check(file.syntax(), Installs::Flagged, TestCode::NotTest)
+    })
 }
 
 #[rstest]
@@ -113,10 +115,12 @@ fn flags_calls_that_install_a_subscriber(#[case] text: &str, #[case] expected: &
     "library installs a log subscriber: `init()`"
 )]
 fn message_names_the_call(#[case] text: &str, #[case] expected: &str) {
-    let messages: Vec<String> = hits(text, |file| check(file.syntax(), Installs::Flagged))
-        .into_iter()
-        .map(|hit| hit.message)
-        .collect();
+    let messages: Vec<String> = hits(text, |file| {
+        check(file.syntax(), Installs::Flagged, TestCode::NotTest)
+    })
+    .into_iter()
+    .map(|hit| hit.message)
+    .collect();
     assert_eq!(messages, [expected]);
 }
 
@@ -125,7 +129,8 @@ fn allowed_file_gets_no_finding() {
     assert_eq!(
         render("fn f(s: S) {\n    s.init();\n}\n", |file| check(
             file.syntax(),
-            Installs::Allowed
+            Installs::Allowed,
+            TestCode::NotTest
         )),
         Vec::<String>::new()
     );

@@ -22,16 +22,34 @@ fn non_utf8() -> OsString {
 }
 
 #[rstest]
-#[case::no_arguments(&[], Command::Check { manifest_path: None })]
+#[case::no_arguments(&[], Command::Check { manifest_path: None, directory: None })]
 #[case::manifest_path(
     &["--manifest-path", "crates/a/Cargo.toml"],
-    Command::Check { manifest_path: Some(PathBuf::from("crates/a/Cargo.toml")) }
+    Command::Check { manifest_path: Some(PathBuf::from("crates/a/Cargo.toml")), directory: None }
+)]
+#[case::directory(
+    &["--directory", "elsewhere"],
+    Command::Check { manifest_path: None, directory: Some(PathBuf::from("elsewhere")) }
+)]
+#[case::directory_then_manifest_path(
+    &["--directory", "elsewhere", "--manifest-path", "crates/a/Cargo.toml"],
+    Command::Check {
+        manifest_path: Some(PathBuf::from("crates/a/Cargo.toml")),
+        directory: Some(PathBuf::from("elsewhere")),
+    }
+)]
+#[case::manifest_path_then_directory(
+    &["--manifest-path", "crates/a/Cargo.toml", "--directory", "elsewhere"],
+    Command::Check {
+        manifest_path: Some(PathBuf::from("crates/a/Cargo.toml")),
+        directory: Some(PathBuf::from("elsewhere")),
+    }
 )]
 #[case::help(&["--help"], Command::Help)]
 #[case::short_help(&["-h"], Command::Help)]
 #[case::flag_spelled_path(
     &["--manifest-path", "-h"],
-    Command::Check { manifest_path: Some(PathBuf::from("-h")) }
+    Command::Check { manifest_path: Some(PathBuf::from("-h")), directory: None }
 )]
 #[case::version(&["--version"], Command::Version)]
 #[case::short_version(&["-V"], Command::Version)]
@@ -41,7 +59,7 @@ fn accepts_documented_arguments(#[case] arguments: &[&str], #[case] expected: Co
 
 /// One usage line per form `accepts_documented_arguments` parses.
 #[rstest]
-#[case::check("  samlinter [--manifest-path <Cargo.toml>]\n")]
+#[case::check("  samlinter [--manifest-path <Cargo.toml>] [--directory <DIR>]\n")]
 #[case::help("  samlinter --help | -h\n")]
 #[case::version("  samlinter --version | -V\n")]
 fn help_shows_every_accepted_form(#[case] usage: &str) {
@@ -54,7 +72,20 @@ fn keeps_a_non_utf8_manifest_path() {
     assert_eq!(
         parse(arguments.into_iter()).unwrap(),
         Command::Check {
-            manifest_path: Some(PathBuf::from(non_utf8()))
+            manifest_path: Some(PathBuf::from(non_utf8())),
+            directory: None
+        }
+    );
+}
+
+#[test]
+fn keeps_a_non_utf8_directory() {
+    let arguments = [OsString::from("--directory"), non_utf8()];
+    assert_eq!(
+        parse(arguments.into_iter()).unwrap(),
+        Command::Check {
+            manifest_path: None,
+            directory: Some(PathBuf::from(non_utf8()))
         }
     );
 }
@@ -76,6 +107,8 @@ fn help_says_how_paths_show() {
 #[rstest]
 #[case::unknown_flag(&["--fix"], r#"["--fix"]"#)]
 #[case::missing_path(&["--manifest-path"], r#"["--manifest-path"]"#)]
+#[case::missing_directory(&["--directory"], r#"["--directory"]"#)]
+#[case::two_directories(&["--directory", "a", "b"], r#"["--directory", "a", "b"]"#)]
 #[case::trailing_argument(&["--help", "extra"], r#"["--help", "extra"]"#)]
 #[case::bare_path(&["Cargo.toml"], r#"["Cargo.toml"]"#)]
 #[case::manifest_path_with_equals(&["--manifest-path=x"], r#"["--manifest-path=x"]"#)]

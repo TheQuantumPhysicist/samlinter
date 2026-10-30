@@ -34,11 +34,75 @@ impl FileKind {
     }
 }
 
+/// Whether a file's code is test code, whole-file, as the walk reaches it: the route passes a
+/// test-gated module declaration or a `cfg_attr` whose cfg requires `test`, each decided by
+/// `syntax::cfg`, or the file is an integration-test target's root. The file-level
+/// counterpart of `is_test_gated`, which covers a file's own attributes and test functions.
+/// Carried by `SourceFile`, so the source check can stay silent in the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TestCode {
+    Test,
+    NotTest,
+}
+
+impl TestCode {
+    /// The file a route of testness `self` reaches through a declaring route of testness
+    /// `gate`: a test module's own submodules are test code too, so one test leg is enough.
+    pub const fn through(self, gate: Self) -> Self {
+        match (self, gate) {
+            (Self::Test, Self::NotTest | Self::Test) | (Self::NotTest, Self::Test) => Self::Test,
+            (Self::NotTest, Self::NotTest) => Self::NotTest,
+        }
+    }
+
+    /// - A file two routes reach is test code only when every route reaches it as test: one
+    ///   route that lints it keeps it linted, since that route's build compiles the file
+    ///   whole. Conservative in the silence direction, and the same either way round.
+    pub const fn either(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Test, Self::Test) => Self::Test,
+            (Self::Test, Self::NotTest) | (Self::NotTest, Self::Test | Self::NotTest) => {
+                Self::NotTest
+            }
+        }
+    }
+}
+
+/// What one route says about the file it reaches: whether its code can end up in the
+/// package's library, and whether this route compiles it as test code, whole-file. The two
+/// travel together: the target sets both, each declaring route folds them at once, and every
+/// merge takes both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RouteCode {
+    pub reach: Reach,
+    pub test: TestCode,
+}
+
+impl RouteCode {
+    /// What the file a route of `self` reaches through a declaring route of testness `test`
+    /// is: a test gate keeps the code out of the library, and one test leg makes it test code.
+    pub const fn through(self, test: TestCode) -> Self {
+        Self {
+            reach: self.reach.through(gate_reach(test)),
+            test: self.test.through(test),
+        }
+    }
+
+    /// A file two routes reach: library code when either route is, test code when every route
+    /// is.
+    pub const fn either(self, other: Self) -> Self {
+        Self {
+            reach: self.reach.either(other.reach),
+            test: self.test.either(other.test),
+        }
+    }
+}
+
 pub struct Candidate {
     pub path: PathBuf,
     pub kind: FileKind,
-    /// `Reach::NotLibrary` when only `cfg_attr` paths whose cfg requires `test` lead here.
-    pub reach: Reach,
+    /// `TestCode::Test` when only `cfg_attr` paths whose cfg requires `test` lead here.
+    pub test: TestCode,
 }
 
 /// What the lookup `candidates` is given finds at an inline module's written directory.
@@ -60,9 +124,10 @@ pub struct Declaration {
     /// The inline `mod m { .. }` blocks around it, outermost first.
     pub inline: Vec<Module>,
     pub module: Module,
-    /// `Reach::NotLibrary` when it, an inline module around it or its file requires `test`
-    /// (`syntax::is_test_module`).
-    pub reach: Reach,
+    /// `Test` when the declaration, an inline module around it or its file requires `test`
+    /// (`syntax::is_test_module`): the code it names is test-only, so it stays out of the
+    /// library and is test code whole-file.
+    pub test: TestCode,
 }
 
 /// A `mod` item's name and the `path` attributes that can place it.
@@ -95,8 +160,8 @@ enum Paths {
 #[derive(Clone, Debug)]
 struct Conditional {
     path: String,
-    /// `Reach::NotLibrary` when the cfg, or one around it, requires `test`.
-    reach: Reach,
+    /// `Test` when the cfg, or one around it, requires `test`.
+    test: TestCode,
 }
 
 /// One place a module may be.
@@ -104,8 +169,8 @@ struct Conditional {
 enum Location<'a> {
     /// Named after the module.
     Default,
-    /// A `path` attribute's value, `Reach::NotLibrary` under a `cfg_attr` requiring `test`.
-    Path { path: &'a str, reach: Reach },
+    /// A `path` attribute's value, `Test` under a `cfg_attr` whose cfg requires `test`.
+    Path { path: &'a str, test: TestCode },
 }
 
 /// - The inline module a walk is inside, linked to the ones around it.
@@ -131,7 +196,7 @@ impl Paths {
             Self::Fixed { fixed, conditional } => (
                 Location::Path {
                     path: fixed,
-                    reach: Reach::Library,
+                    test: TestCode::NotTest,
                 },
                 conditional,
             ),
@@ -144,15 +209,15 @@ impl Paths {
         iter::once(unconditional).chain(conditional.iter().map(Conditional::location))
     }
 
-    /// Every path value in attribute order, each `through` the reach of the cfg around them.
-    fn into_values(self, reach: Reach) -> Vec<Conditional> {
+    /// Every path value in attribute order, each `through` the testness of the cfg around them.
+    fn into_values(self, test: TestCode) -> Vec<Conditional> {
         let values = match self {
             Self::Open { conditional } => conditional,
             Self::Fixed { fixed, conditional } => [
                 conditional,
                 vec![Conditional {
                     path: fixed,
-                    reach: Reach::Library,
+                    test: TestCode::NotTest,
                 }],
             ]
             .concat(),
@@ -160,7 +225,7 @@ impl Paths {
         values
             .into_iter()
             .map(|value| Conditional {
-                reach: reach.through(value.reach),
+                test: test.through(value.test),
                 ..value
             })
             .collect()
@@ -182,7 +247,7 @@ impl Conditional {
     fn location(&self) -> Location<'_> {
         Location::Path {
             path: &self.path,
-            reach: self.reach,
+            test: self.test,
         }
     }
 }
@@ -204,13 +269,13 @@ fn open_then(
         ast::Meta::CfgAttrMeta(cfg_attr) => {
             // The same rule holds inside the `cfg_attr`, and its cfg makes each path conditional.
             let inner = paths(cfg_attr.metas().map(|meta| (meta, line)))?;
-            let reach = gate_reach(
+            let test = gate_test(
                 cfg_attr
                     .cfg_predicate()
                     .is_some_and(|predicate| requires_test(&predicate)),
             );
             Ok(Paths::Open {
-                conditional: [conditional, inner.into_values(reach)].concat(),
+                conditional: [conditional, inner.into_values(test)].concat(),
             })
         }
         ast::Meta::CfgMeta(_)
@@ -228,29 +293,38 @@ pub fn declarations(text: &str, edition: Edition) -> Result<Vec<Declaration>, Ba
         text,
         crate::syntax::module_items(tree.items()),
         None,
-        gate_reach(is_test_gated(tree.syntax())),
+        gate_test(is_test_gated(tree.syntax())),
     )
 }
 
-/// - `Reach::NotLibrary` for a test-gated file or module.
-/// - The reach a declaration gives a library route; `Reach::through` combines them.
-const fn gate_reach(test_gated: bool) -> Reach {
+/// - `TestCode::Test` for a test-gated file or module.
+/// - The testness a declaration gives a route; `TestCode::through` combines them.
+const fn gate_test(test_gated: bool) -> TestCode {
     if test_gated {
-        Reach::NotLibrary
+        TestCode::Test
     } else {
-        Reach::Library
+        TestCode::NotTest
     }
 }
 
-/// `reach` is that of the items' module: their file, then each inline module around them.
+/// The library reach of a declaring route's testness: a test gate keeps the code out of the
+/// library.
+const fn gate_reach(test: TestCode) -> Reach {
+    match test {
+        TestCode::Test => Reach::NotLibrary,
+        TestCode::NotTest => Reach::Library,
+    }
+}
+
+/// `testness` is that of the items' module: their file, then each inline module around them.
 fn in_items(
     text: &str,
     modules: impl Iterator<Item = ast::Module>,
     enclosing: Option<&Enclosing>,
-    reach: Reach,
+    testness: TestCode,
 ) -> Result<Vec<Declaration>, BadPath> {
     let nested = modules
-        .map(|module| in_module(text, &module, enclosing, reach))
+        .map(|module| in_module(text, &module, enclosing, testness))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(nested.into_iter().flatten().collect())
 }
@@ -259,10 +333,10 @@ fn in_module(
     text: &str,
     module: &ast::Module,
     enclosing: Option<&Enclosing>,
-    reach: Reach,
+    testness: TestCode,
 ) -> Result<Vec<Declaration>, BadPath> {
     match (module.name(), module_body(module)) {
-        (Some(name), Some(body)) => in_named_module(text, module, &name, body, enclosing, reach),
+        (Some(name), Some(body)) => in_named_module(text, module, &name, body, enclosing, testness),
         // A `mod` without a name, or with neither `;` nor an item list, is a syntax error, which
         // the source check reports.
         (None, None | Some(_)) | (Some(_), None) => Ok(Vec::new()),
@@ -276,7 +350,7 @@ fn in_named_module(
     name: &ast::Name,
     body: ModuleBody,
     enclosing: Option<&Enclosing>,
-    reach: Reach,
+    testness: TestCode,
 ) -> Result<Vec<Declaration>, BadPath> {
     let keyword = mod_keyword(module);
     // rustc reads the outer attributes, then an inline module's inner `#![..]` ones.
@@ -288,14 +362,14 @@ fn in_named_module(
         name: unraw(name.text()).to_owned(),
         paths: paths(attributes)?,
     };
-    let reach = reach.through(gate_reach(is_test_module(module)));
+    let testness = testness.through(gate_test(is_test_module(module)));
 
     match body {
         ModuleBody::OutOfLine => Ok(vec![Declaration {
             line: line(text, keyword.text_range().start()),
             inline: outermost_first(enclosing),
             module: this,
-            reach,
+            test: testness,
         }]),
         ModuleBody::Inline(list) => in_items(
             text,
@@ -304,7 +378,7 @@ fn in_named_module(
                 module: this,
                 outer: enclosing,
             }),
-            reach,
+            testness,
         ),
     }
 }
@@ -390,8 +464,8 @@ struct Base {
     /// `path` values are relative to it: the file's own directory, which differs from `default`
     /// only for a non-mod-rs file outside every inline module.
     path: PathBuf,
-    /// `Reach::NotLibrary` when only `cfg_attr` directories requiring `test` lead here.
-    reach: Reach,
+    /// `Test` when only `cfg_attr` directories whose cfg requires `test` lead here.
+    test: TestCode,
 }
 
 impl Base {
@@ -404,7 +478,7 @@ impl Base {
         Self {
             default,
             path: dir.to_path_buf(),
-            reach: Reach::Library,
+            test: TestCode::NotTest,
         }
     }
 
@@ -428,15 +502,15 @@ impl Base {
         // - Entering it anyway doubles the bases at every nesting level.
         let others = conditional.iter().filter_map(|value| {
             let written = self.dir(module, value.location());
-            let reach = self.reach.through(value.reach);
+            let test = self.test.through(value.test);
             match directory(&written) {
-                Ok(Directory::At(path)) => Some(Ok(Self::at(path, reach))),
-                Ok(Directory::AsWritten) => Some(Ok(Self::at(written, reach))),
+                Ok(Directory::At(path)) => Some(Ok(Self::at(path, test))),
+                Ok(Directory::AsWritten) => Some(Ok(Self::at(written, test))),
                 Ok(Directory::Absent) => None,
                 Err(error) => Some(Err(error)),
             }
         });
-        iter::once(Ok(Self::at(first, self.reach)))
+        iter::once(Ok(Self::at(first, self.test)))
             .chain(others)
             .collect()
     }
@@ -445,16 +519,16 @@ impl Base {
     fn dir(&self, module: &Module, location: Location<'_>) -> PathBuf {
         match location {
             Location::Default => self.default.join(&module.name),
-            Location::Path { path, reach: _ } => self.path.join(path),
+            Location::Path { path, test: _ } => self.path.join(path),
         }
     }
 
     /// Inside an inline module both bases are its directory.
-    fn at(dir: PathBuf, reach: Reach) -> Self {
+    fn at(dir: PathBuf, test: TestCode) -> Self {
         Self {
             default: dir.clone(),
             path: dir,
-            reach,
+            test,
         }
     }
 
@@ -469,18 +543,18 @@ impl Base {
                     Candidate {
                         path: self.default.join(format!("{}.rs", module.name)),
                         kind: FileKind::NonModRs,
-                        reach: self.reach,
+                        test: self.test,
                     },
                     Candidate {
                         path: self.default.join(&module.name).join("mod.rs"),
                         kind: FileKind::ModRs,
-                        reach: self.reach,
+                        test: self.test,
                     },
                 ],
-                Location::Path { path, reach } => vec![Candidate {
+                Location::Path { path, test } => vec![Candidate {
                     path: self.path.join(path),
                     kind: FileKind::ModRs,
-                    reach: self.reach.through(reach),
+                    test: self.test.through(test),
                 }],
             })
             .collect()
@@ -518,13 +592,13 @@ pub fn candidates(
 
 /// - `bases` in order, each directory once: `enter` gave every spelling of an existing one the
 ///   same path.
-/// - A directory several locations lead to is library code when any of them is.
+/// - A directory several locations lead to is test code only when every location is.
 fn first_of_each(bases: Vec<Base>) -> Vec<Base> {
     bases
         .into_iter()
         .fold(Vec::new(), |mut kept: Vec<Base>, base| {
             match kept.iter_mut().find(|seen| seen.path == base.path) {
-                Some(seen) => seen.reach = seen.reach.either(base.reach),
+                Some(seen) => seen.test = seen.test.either(base.test),
                 None => kept.push(base),
             }
             kept

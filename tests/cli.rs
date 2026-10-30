@@ -229,6 +229,92 @@ fn no_arguments_in_a_member_directory_lints_the_whole_workspace() {
     );
 }
 
+/// `--directory` moves the run's root: the workspace is found from it and paths print
+/// relative to it, exactly as a `--manifest-path` run on the same workspace prints them.
+#[test]
+fn directory_flag_lints_the_workspace_found_from_it() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/violations");
+    assert_findings(
+        &run(&[OsStr::new("--directory"), directory.as_os_str()]).unwrap(),
+        VIOLATIONS,
+    );
+}
+
+/// A relative `--directory` resolves against the process working directory, the only place
+/// the process cwd is consulted: the test binary runs from the crate root.
+#[test]
+fn a_relative_directory_resolves_against_the_process_working_directory() {
+    assert_findings(
+        &run(&[
+            OsStr::new("--directory"),
+            OsStr::new("tests/fixtures/violations"),
+        ])
+        .unwrap(),
+        VIOLATIONS,
+    );
+}
+
+/// From a member directory, like a run started there with no arguments.
+#[test]
+fn directory_flag_from_a_member_directory_lints_the_whole_workspace() {
+    let member_dir = manifest("violations").with_file_name("app");
+    assert_findings(
+        &run(&[OsStr::new("--directory"), member_dir.as_os_str()]).unwrap(),
+        VIOLATIONS,
+    );
+}
+
+/// A relative `--manifest-path` resolves under `--directory`.
+#[test]
+fn directory_and_manifest_path_combine() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    assert_findings(
+        &run(&[
+            OsStr::new("--directory"),
+            directory.as_os_str(),
+            OsStr::new("--manifest-path"),
+            OsStr::new("violations/Cargo.toml"),
+        ])
+        .unwrap(),
+        VIOLATIONS,
+    );
+}
+
+/// `violations_link` is a symlink to `violations`: the operating system resolves the working
+/// directory, so the run is the one on the directory it leads to.
+#[test]
+fn directory_through_a_symlink_prints_the_same_paths() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/violations_link");
+    assert_findings(
+        &run(&[OsStr::new("--directory"), directory.as_os_str()]).unwrap(),
+        VIOLATIONS,
+    );
+}
+
+#[test]
+fn missing_directory_is_an_error() {
+    assert_error(
+        &run(&[
+            OsStr::new("--directory"),
+            OsStr::new("tests/fixtures/absent"),
+        ])
+        .unwrap(),
+        &["tests/fixtures/absent: no such file or directory"],
+    );
+}
+
+#[test]
+fn a_file_as_directory_is_an_error() {
+    assert_error(
+        &run(&[
+            OsStr::new("--directory"),
+            manifest("violations").as_os_str(),
+        ])
+        .unwrap(),
+        &["not a directory"],
+    );
+}
+
 #[test]
 fn each_reported_rule_is_explained_once() {
     let stdout = String::from_utf8(samlinter("violations").unwrap().stdout).unwrap();
@@ -845,4 +931,108 @@ fn version_prints_the_package_version_and_passes() {
     );
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
     assert_eq!(output.status.code(), Some(0));
+}
+
+/// `json!` in a plain function: fires in linted code, silent in a test-reached file.
+const JSON_BODY: &str = "fn plain() {\n    let _v = serde_json::json!({ \"a\": 1 });\n}\n";
+
+/// An unexplained discard in a `#[test]` function: the walk skips a test subtree even in
+/// linted code, and a test-reached file is silent whole-file, so this never fires.
+const DISCARD_BODY: &str = "#[test]\nfn t() {\n    let _ = returns_result();\n}\n";
+
+/// - A test module declared in its own file, `#[cfg(test)] mod tests;` in `lib.rs`, is test
+///   code whole-file: `json!` anywhere in it stays silent, like the inline form.
+#[test]
+fn a_test_module_in_its_own_file_is_silent() {
+    let (manifest, _cleanup) = scratch_workspace(
+        "test_file_silent",
+        vec![
+            ("src/lib.rs", "#[cfg(test)]\nmod tests;\n".to_owned()),
+            ("src/tests.rs", JSON_BODY.to_owned()),
+        ],
+    )
+    .unwrap();
+    assert_clean(&run(&[OsStr::new("--manifest-path"), manifest.as_os_str()]).unwrap());
+}
+
+/// An unexplained discard in the separate-file test module stays silent, `#[test]`
+/// function or not: the file is test code whole-file.
+#[test]
+fn a_discard_in_the_test_file_is_silent() {
+    let (manifest, _cleanup) = scratch_workspace(
+        "test_file_discard_silent",
+        vec![
+            ("src/lib.rs", "#[cfg(test)]\nmod tests;\n".to_owned()),
+            ("src/tests.rs", DISCARD_BODY.to_owned()),
+        ],
+    )
+    .unwrap();
+    assert_clean(&run(&[OsStr::new("--manifest-path"), manifest.as_os_str()]).unwrap());
+}
+
+/// A submodule of the separate-file test module is test code too, through the route. The
+/// module declares it from `tests/mod.rs`, the shape `module_shape` asks of a module with
+/// submodules.
+#[test]
+fn a_submodule_of_the_test_file_is_silent() {
+    let (manifest, _cleanup) = scratch_workspace(
+        "test_file_submodule_silent",
+        vec![
+            ("src/lib.rs", "#[cfg(test)]\nmod tests;\n".to_owned()),
+            ("src/tests/mod.rs", "mod helper;\n".to_owned()),
+            ("src/tests/helper.rs", JSON_BODY.to_owned()),
+        ],
+    )
+    .unwrap();
+    assert_clean(&run(&[OsStr::new("--manifest-path"), manifest.as_os_str()]).unwrap());
+}
+
+/// An integration test target's root file is test code whole-file.
+#[test]
+fn an_integration_test_target_is_silent() {
+    let (manifest, _cleanup) = scratch_workspace(
+        "integration_test_silent",
+        vec![
+            ("src/lib.rs", String::new()),
+            ("tests/it.rs", format!("{JSON_BODY}\n{DISCARD_BODY}")),
+        ],
+    )
+    .unwrap();
+    assert_clean(&run(&[OsStr::new("--manifest-path"), manifest.as_os_str()]).unwrap());
+}
+
+/// The inline form `#[cfg(test)] mod tests { .. }` already stays silent: pinned as the
+/// contrast the separate-file form must match.
+#[test]
+fn the_inline_test_module_stays_silent() {
+    let (manifest, _cleanup) = scratch_workspace(
+        "inline_test_silent",
+        vec![(
+            "src/lib.rs",
+            "#[cfg(test)]\nmod tests {\n    fn plain() {\n        let _v = serde_json::json!({ \"a\": 1 });\n    }\n\n    #[test]\n    fn t() {\n        let _ = returns_result();\n    }\n}\n"
+                .to_owned(),
+        )],
+    )
+    .unwrap();
+    assert_clean(&run(&[OsStr::new("--manifest-path"), manifest.as_os_str()]).unwrap());
+}
+
+/// The silence is not overbroad: the same code in plain library code is two findings.
+#[test]
+fn a_non_test_file_still_fires() {
+    let (manifest, _cleanup) = scratch_workspace(
+        "non_test_fires",
+        vec![(
+            "src/lib.rs",
+            format!("{JSON_BODY}\nfn other() {{\n    let _ = returns_result();\n}}\n"),
+        )],
+    )
+    .unwrap();
+    assert_findings(
+        &run(&[OsStr::new("--manifest-path"), manifest.as_os_str()]).unwrap(),
+        &[
+            "src/lib.rs:6:5: discarded_result: `let _ =` discards a result without a stated reason",
+            "src/lib.rs:2:26: json_macro: `json!` constructs untyped JSON",
+        ],
+    );
 }

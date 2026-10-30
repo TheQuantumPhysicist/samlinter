@@ -83,6 +83,7 @@ fn package_files(package: &Package, config: &Config, gate: &Gate) -> Vec<Finding
             config,
             gate.installs(&source.file.path),
             source.kind,
+            source.test,
         )
     });
     sources

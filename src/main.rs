@@ -68,7 +68,10 @@ fn run_on_stack(
 
 fn execute(command: Command) -> Result<Outcome> {
     match command {
-        Command::Check { manifest_path } => lint(manifest_path.as_deref()),
+        Command::Check {
+            manifest_path,
+            directory,
+        } => lint(manifest_path.as_deref(), directory.as_deref()),
         Command::Help => print(cli::HELP).map(|()| Outcome::Clean),
         Command::Version => {
             print(&format!("samlinter {}\n", env!("CARGO_PKG_VERSION"))).map(|()| Outcome::Clean)
@@ -78,8 +81,8 @@ fn execute(command: Command) -> Result<Outcome> {
 
 /// - Warnings go to stderr before the findings; they leave the exit status alone.
 /// - A warning that cannot be written is an error, like any other output.
-fn lint(manifest_path: Option<&Path>) -> Result<Outcome> {
-    let workspace = workspace::load(manifest_path)?;
+fn lint(manifest_path: Option<&Path>, directory: Option<&Path>) -> Result<Outcome> {
+    let workspace = workspace::load(manifest_path, directory)?;
     workspace.warnings.iter().try_for_each(|warning| {
         writeln!(io::stderr().lock(), "samlinter: warning: {warning}")
             .context("cannot write to stderr")

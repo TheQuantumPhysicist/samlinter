@@ -1,11 +1,17 @@
 use super::super::{hits, render};
 use super::check;
 use crate::config::Config;
+use crate::workspace::TestCode;
 use ra_ap_syntax::{AstNode, Edition};
 use rstest::rstest;
 
 fn json_macros(text: &str) -> Vec<String> {
-    render(text, |file| check(file.syntax()))
+    render(text, |file| check(file.syntax(), TestCode::NotTest))
+}
+
+/// `json_macros` for a file the walk reached as test code whole-file.
+fn json_macros_in_a_test_file(text: &str) -> Vec<String> {
+    render(text, |file| check(file.syntax(), TestCode::Test))
 }
 
 /// Every `json!` invocation outside test code, at the macro's name, any path form.
@@ -43,6 +49,14 @@ fn silent_inside_test_code(#[case] text: &str, #[case] expected: &[&str]) {
     assert_eq!(json_macros(text), expected);
 }
 
+/// A file the walk reached as test code is silent whole-file, wherever the `json!` sits in it.
+#[rstest]
+#[case::in_a_plain_function("fn f() { json!(1); }\n", &[])]
+#[case::in_item_position("json!({});\n", &[])]
+fn silent_in_a_test_reached_file(#[case] text: &str, #[case] expected: &[&str]) {
+    assert_eq!(json_macros_in_a_test_file(text), expected);
+}
+
 /// Only the macro named `json` counts.
 #[rstest]
 #[case::another_macro("fn f() { m!(1); }\n", &[])]
@@ -53,10 +67,12 @@ fn silent_on_other_macro_names(#[case] text: &str, #[case] expected: &[&str]) {
 
 #[test]
 fn message_names_the_macro() {
-    let messages: Vec<String> = hits("fn f() { json!(1); }\n", |file| check(file.syntax()))
-        .into_iter()
-        .map(|hit| hit.message)
-        .collect();
+    let messages: Vec<String> = hits("fn f() { json!(1); }\n", |file| {
+        check(file.syntax(), TestCode::NotTest)
+    })
+    .into_iter()
+    .map(|hit| hit.message)
+    .collect();
     assert_eq!(messages, ["`json!` constructs untyped JSON"]);
 }
 
@@ -77,6 +93,7 @@ fn exempted_with_an_expect_on_the_function() {
         &config,
         super::super::Installs::Allowed,
         super::super::FileKind::ModRs,
+        TestCode::NotTest,
     );
     assert!(findings.is_empty(), "{findings:?}");
 }

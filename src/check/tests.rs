@@ -2,7 +2,7 @@ use super::{PROFILES, run, text_file};
 use crate::config::{Config, forbidden_words, words};
 use crate::workspace::{
     Dependency, Excluded, FileKind, Package, PackageKind, Readme, Root, Section, SourceFile,
-    TextFile, Workspace,
+    TestCode, TextFile, Workspace,
 };
 use ra_ap_syntax::Edition;
 use rstest::rstest;
@@ -40,6 +40,7 @@ fn package(dir: &str, kind: PackageKind, source: &str) -> Package {
         sources: vec![SourceFile {
             file: text_file(&format!("{dir}{source_name}"), source),
             kind: FileKind::ModRs,
+            test: TestCode::NotTest,
         }],
         library_code: BTreeSet::new(),
     }
@@ -47,6 +48,11 @@ fn package(dir: &str, kind: PackageKind, source: &str) -> Package {
 
 /// A virtual workspace whose one library member holds `source` as `lib/src/lib.rs`.
 fn workspace(edition: Edition, source: &str) -> Workspace {
+    marked_workspace(edition, TestCode::NotTest, source)
+}
+
+/// `workspace` with the file marked as the walk decides: test code whole-file, or linted.
+fn marked_workspace(edition: Edition, test: TestCode, source: &str) -> Workspace {
     Workspace {
         config: config_file(),
         settings: config(),
@@ -66,6 +72,7 @@ fn workspace(edition: Edition, source: &str) -> Workspace {
             sources: vec![SourceFile {
                 file: text_file("lib/src/lib.rs", source),
                 kind: FileKind::ModRs,
+                test,
             }],
             library_code: BTreeSet::new(),
         }],
@@ -108,6 +115,38 @@ fn identical_findings_print_once() {
         lines(&workspace(Edition::Edition2024, source)),
         [
             "lib/src/lib.rs:1:1: unfulfilled_exemption: exemption for `rest_pattern` matches nothing here"
+        ]
+    );
+}
+
+/// A file the walk reached as test code is silent for the test-silent rules, here `json!`
+/// and an unexplained discard, whatever sits inside it.
+#[test]
+fn a_test_reached_file_is_silent_for_the_test_code_rules() {
+    let source = "fn plain() {\n    let _v = json!({ \"a\": 1 });\n    let _ = g();\n}\n";
+    assert_eq!(
+        lines(&marked_workspace(
+            Edition::Edition2024,
+            TestCode::Test,
+            source
+        )),
+        Vec::<String>::new()
+    );
+}
+
+/// The same file, reached as linted code, fires both.
+#[test]
+fn the_same_file_linted_still_fires() {
+    let source = "fn plain() {\n    let _v = json!({ \"a\": 1 });\n    let _ = g();\n}\n";
+    assert_eq!(
+        lines(&marked_workspace(
+            Edition::Edition2024,
+            TestCode::NotTest,
+            source
+        )),
+        [
+            "lib/src/lib.rs:2:14: json_macro: `json!` constructs untyped JSON",
+            "lib/src/lib.rs:3:5: discarded_result: `let _ =` discards a result without a stated reason",
         ]
     );
 }
@@ -295,6 +334,7 @@ fn subscriber_workspace(lib_code: &[&str], member_code: &[&str]) -> Workspace {
         sources: vec![SourceFile {
             file: text_file("lib/src/lib.rs", INSTALL),
             kind: FileKind::ModRs,
+            test: TestCode::NotTest,
         }],
         library_code: code(lib_code),
     };
@@ -306,10 +346,12 @@ fn subscriber_workspace(lib_code: &[&str], member_code: &[&str]) -> Workspace {
             SourceFile {
                 file: text_file("member/src/helper.rs", INSTALL),
                 kind: FileKind::NonModRs,
+                test: TestCode::NotTest,
             },
             SourceFile {
                 file: text_file("member/src/lib.rs", INSTALL),
                 kind: FileKind::ModRs,
+                test: TestCode::NotTest,
             },
         ],
         library_code: code(member_code),

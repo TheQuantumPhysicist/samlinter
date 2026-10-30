@@ -13,7 +13,7 @@ use super::prose::{self, Piece};
 use crate::config::Config;
 use crate::finding::{BOM, Finding, Hit, Rule, positions};
 use crate::syntax::{has_test_attribute, is_test_gated};
-use crate::workspace::{FileKind, TextFile};
+use crate::workspace::{FileKind, TestCode, TextFile};
 use ra_ap_syntax::ast::CommentShape;
 use ra_ap_syntax::{
     AstNode, AstToken, Edition, NodeOrToken, SyntaxError, SyntaxNode, WalkEvent, ast,
@@ -27,11 +27,12 @@ pub fn check(
     config: &Config,
     installs: Installs,
     kind: FileKind,
+    testness: TestCode,
 ) -> Vec<Finding> {
     let text = rustc_input(&file.text);
 
     let hits = match parse(&text, edition) {
-        Ok(tree) => lint(&tree, &text, config, installs, kind, &file.shown),
+        Ok(tree) => lint(&tree, &text, config, installs, kind, testness, &file.shown),
         Err(errors) => errors
             .iter()
             .map(|error| {
@@ -74,6 +75,7 @@ fn lint(
     config: &Config,
     installs: Installs,
     kind: FileKind,
+    testness: TestCode,
     shown: &Path,
 ) -> Vec<Hit> {
     let root = tree.syntax();
@@ -84,9 +86,9 @@ fn lint(
         .chain(module_shape::check(tree, kind, shown))
         .chain(layout::check(tree))
         .chain(comment_hits(root, text, config))
-        .chain(subscriber::check(root, installs))
-        .chain(json_macro::check(root))
-        .chain(discarded_result::check(root, text))
+        .chain(subscriber::check(root, installs, testness))
+        .chain(json_macro::check(root, testness))
+        .chain(discarded_result::check(root, text, testness))
         .collect();
     exemption::apply(root, hits)
 }
@@ -171,24 +173,34 @@ fn end(node: &SyntaxNode) -> usize {
 }
 
 /// - Each node outside test code, folded by `at` into the rule's findings.
-/// - Test code: a node whose own attributes require `test`, or a test function, or anything
-///   inside either. A test subtree is skipped whole, so the walk stays linear.
-fn outside_test_code<T>(root: &SyntaxNode, mut at: impl FnMut(&SyntaxNode) -> Option<T>) -> Vec<T> {
-    let mut walk = root.preorder();
-    let mut found = Vec::new();
-    while let Some(event) = walk.next() {
-        match event {
-            WalkEvent::Enter(node) => {
-                if is_test_gated(&node) || has_test_attribute(&node) {
-                    walk.skip_subtree();
-                } else if let Some(item) = at(&node) {
-                    found.push(item);
+/// - A file the walk reached as test code is test code whole-file: nothing in it is visited.
+/// - Otherwise test code is a node whose own attributes require `test`, or a test function,
+///   or anything inside either. A test subtree is skipped whole, so the walk stays linear.
+fn outside_test_code<T>(
+    root: &SyntaxNode,
+    test: TestCode,
+    mut at: impl FnMut(&SyntaxNode) -> Option<T>,
+) -> Vec<T> {
+    match test {
+        TestCode::Test => Vec::new(),
+        TestCode::NotTest => {
+            let mut walk = root.preorder();
+            let mut found = Vec::new();
+            while let Some(event) = walk.next() {
+                match event {
+                    WalkEvent::Enter(node) => {
+                        if is_test_gated(&node) || has_test_attribute(&node) {
+                            walk.skip_subtree();
+                        } else if let Some(item) = at(&node) {
+                            found.push(item);
+                        }
+                    }
+                    WalkEvent::Leave(_) => {}
                 }
             }
-            WalkEvent::Leave(_) => {}
+            found
         }
     }
-    found
 }
 
 /// Runs `rule` on edition-2024 `text`, which must parse.

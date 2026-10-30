@@ -1,5 +1,6 @@
-use super::{comment_tokens, end, start};
+use super::{comment_tokens, end, outside_test_code, start};
 use crate::finding::{Hit, Rule, positions};
+use crate::workspace::TestCode;
 use ra_ap_syntax::{AstNode, AstToken, SyntaxNode, ast};
 
 const MESSAGE: &str = "`let _ =` discards a result without a stated reason";
@@ -8,17 +9,18 @@ const MESSAGE: &str = "`let _ =` discards a result without a stated reason";
 ///   above, at the statement's start.
 /// - The adjacent comment is not an exemption: stating the reason there is how this rule is
 ///   satisfied, so an `expect` attribute is the wrong tool and none is accepted.
+/// - Silent inside test code, like every rule sharing `outside_test_code`: a file the walk
+///   reached as test code whole-file, a node whose own attributes require `test`, and test
+///   functions. The stated reason is always available there, as anywhere.
 /// - Macro bodies are token trees, so a discard inside one is not seen.
-pub fn check(root: &SyntaxNode, text: &str) -> Vec<Hit> {
-    let discards: Vec<Discard> = root
-        .descendants()
-        .filter_map(ast::LetStmt::cast)
-        .filter(discards_everything)
-        .map(|stmt| Discard {
+pub fn check(root: &SyntaxNode, text: &str, testness: TestCode) -> Vec<Hit> {
+    let discards: Vec<Discard> = outside_test_code(root, testness, |node| {
+        let stmt = ast::LetStmt::cast(node.clone())?;
+        discards_everything(&stmt).then(|| Discard {
             first: start(stmt.syntax()),
             last: end(stmt.syntax()),
         })
-        .collect();
+    });
     let comment_starts: Vec<usize> = comment_tokens(root)
         .iter()
         .map(|comment| usize::from(comment.syntax().text_range().start()))

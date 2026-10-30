@@ -1,20 +1,26 @@
 use super::super::text_file;
 use super::{FileKind, Installs, check};
 use crate::config::{Config, forbidden_words};
-use crate::workspace::TextFile;
+use crate::workspace::{TestCode, TextFile};
 use ra_ap_syntax::Edition;
 use rstest::rstest;
 use std::path::PathBuf;
 
 const PHRASE: &str = "it is worth noting";
 
-fn findings_in(edition: Edition, installs: Installs, kind: FileKind, text: &str) -> Vec<String> {
+fn findings_in(
+    edition: Edition,
+    installs: Installs,
+    kind: FileKind,
+    testness: TestCode,
+    text: &str,
+) -> Vec<String> {
     let file = text_file("src/lib.rs", text);
     let config = Config {
         forbidden_words: forbidden_words(&["NOTES.md", "AGENTS.md", "GPT", PHRASE], &[]),
         subscriber_crates: Vec::new(),
     };
-    check(&file, edition, &config, installs, kind)
+    check(&file, edition, &config, installs, kind, testness)
         .iter()
         .map(ToString::to_string)
         .collect()
@@ -25,6 +31,7 @@ fn findings(text: &str) -> Vec<String> {
         Edition::Edition2024,
         Installs::Allowed,
         FileKind::ModRs,
+        TestCode::NotTest,
         text,
     )
 }
@@ -35,6 +42,7 @@ fn non_mod_findings(text: &str) -> Vec<String> {
         Edition::Edition2024,
         Installs::Allowed,
         FileKind::NonModRs,
+        TestCode::NotTest,
         text,
     )
 }
@@ -179,6 +187,7 @@ fn parses_with_the_package_edition(#[case] edition: Edition, #[case] expected: &
             edition,
             Installs::Allowed,
             FileKind::ModRs,
+            TestCode::NotTest,
             "fn f() {\n    let gen = 1;\n}\n"
         ),
         expected
@@ -275,6 +284,7 @@ fn exemption_lifts_each_rust_source_rule(
             Edition::Edition2024,
             Installs::Flagged,
             kind,
+            TestCode::NotTest,
             &exempting(rule, text)
         ),
         Vec::<String>::new()
@@ -299,6 +309,7 @@ fn exemption_matching_nothing_is_unfulfilled(#[case] rule: &str, #[case] kind: F
             Edition::Edition2024,
             Installs::Flagged,
             kind,
+            TestCode::NotTest,
             &exempting(rule, "ATTR\nfn f() {}\n")
         ),
         [format!(
@@ -462,7 +473,8 @@ fn module_shape_shows_the_display_path_not_the_real_one() {
             Edition::Edition2024,
             &config,
             Installs::Allowed,
-            FileKind::NonModRs
+            FileKind::NonModRs,
+            TestCode::NotTest
         )
         .iter()
         .map(ToString::to_string)
@@ -482,6 +494,7 @@ fn a_path_written_file_gets_path_attr_not_module_shape() {
             Edition::Edition2024,
             Installs::Allowed,
             FileKind::ModRs,
+            TestCode::NotTest,
             "#[path = \"x.rs\"]\nmod x;\n"
         ),
         [
