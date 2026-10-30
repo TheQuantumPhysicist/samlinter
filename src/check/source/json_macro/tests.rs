@@ -14,12 +14,18 @@ fn json_macros_in_a_test_file(text: &str) -> Vec<String> {
     render(text, |file| check(file.syntax(), TestCode::Test))
 }
 
-/// Every `json!` invocation outside test code, at the macro's name, any path form.
+/// Every `json!` invocation with a payload outside test code, at the macro's name, any path
+/// form; an invocation whose argument is exactly an empty object is exempt.
 #[rstest]
 #[case::bare("fn f() { json!({\"k\": 1}); }\n", &["1:10 json_macro"])]
 #[case::through_the_crate_path("fn f() { serde_json::json!(1); }\n", &["1:22 json_macro"])]
 #[case::through_any_leading_path("fn f() { a::b::json!(1); }\n", &["1:16 json_macro"])]
-#[case::in_item_position("json!({});\n", &["1:1 json_macro"])]
+#[case::in_item_position("json!({\"k\": 1});\n", &["1:1 json_macro"])]
+#[case::an_empty_object_is_exempt("fn f() { json!({}); }\n", &[])]
+#[case::empty_object_with_inner_whitespace_is_exempt("fn f() { json!( { } ); }\n", &[])]
+#[case::empty_object_with_a_comment_is_exempt("fn f() { json!({ /* wired elsewhere */ }); }\n", &[])]
+#[case::empty_object_in_item_position_is_exempt("json!({});\n", &[])]
+#[case::a_payload_with_an_empty_string_key_still_flags("fn f() { json!({\"\": 1}); }\n", &["1:10 json_macro"])]
 #[case::beside_a_test_module(
     "#[cfg(test)]\nmod tests {\n    fn a() { json!(1); }\n}\n\nfn b() { json!(1); }\n",
     &["6:10 json_macro"]

@@ -127,7 +127,7 @@ Rust sources are found the way the compiler finds them, not by listing directori
 | `system_time_now` | a `now()` call on `SystemTime`, `Instant` (std or tokio), `Utc` or `Local`, by any route |
 | `regex_use` | the regex crate: any path whose leading segment is `regex`, plus a `Regex::new` / `RegexBuilder::new` constructor path, called or not; look-alike crates stay silent |
 | `direct_rng` | direct randomness: `thread_rng()`, `random()`, an RNG type (`OsRng`, `StdRng`, `SmallRng`, `ChaChaRng`), `from_entropy` or `seed_from_u64` |
-| `json_macro` | a `json!` macro invocation in non-test code, see below |
+| `json_macro` | a `json!` macro invocation with a non-empty argument in non-test code, see below |
 | `discarded_result` | a `let _ = ..;` with no comment stating why the discard is safe on its line or the one above |
 
 - `rest_pattern`: also on the left of a destructuring assignment, such as `(a, ..) = t;` or
@@ -219,8 +219,10 @@ Rust sources are found the way the compiler finds them, not by listing directori
   `rng.gen()` is not flagged, so the rule is a tripwire for constructors and free
   functions, not a proof.
 - `json_macro`: every path form counts: `json!(..)`, `serde_json::json!(..)`, any leading path
-  ending in `::json!`, in expression or item position, reported at the macro's name. A
-  `json!` inside a macro body is not seen.
+  ending in `::json!`, in expression or item position, reported at the macro's name. An
+  invocation whose argument is exactly an empty object (`json!({})`, inner whitespace
+  allowed) is silent: it has no typed-struct replacement. A `json!` inside a macro body is
+  not seen.
 - `json_macro`: silent inside test code: a file only test-gated `mod` declarations reach
   (`#[cfg(test)] mod tests;` leads to `tests.rs` and everything below it) or a test target's
   root file and everything below it, an item under a `#[cfg(test)]` module or function (an
