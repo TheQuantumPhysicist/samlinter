@@ -843,7 +843,7 @@ fn invalid_config_is_an_error() {
     let output = samlinter("misconfigured").unwrap();
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "samlinter: invalid samlinter.toml: TOML parse error at line 4, column 1\n  |\n4 | severity = \"warn\"\n  | ^^^^^^^^\nunknown field `severity`, expected one of `forbidden-words`, `forbidden-words-insensitive`, `subscriber-crates`, `exclude`\n\n"
+        "samlinter: invalid samlinter.toml: TOML parse error at line 4, column 1\n  |\n4 | severity = \"warn\"\n  | ^^^^^^^^\nunknown field `severity`, expected one of `forbidden-words`, `forbidden-words-insensitive`, `forbidden-patterns`, `subscriber-crates`, `exclude`\n\n"
     );
     assert_eq!(output.status.code(), Some(2));
 }

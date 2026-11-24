@@ -205,7 +205,11 @@ pub fn check(role: &Role, config: &Config) -> Result<Vec<Finding>> {
     match &Document::parse(manifest.text.as_str()) {
         Ok(document) => Ok([
             placed(lint(document.as_table(), role), manifest)?,
-            toml_comments::check(manifest, &config.forbidden_words),
+            toml_comments::check(
+                manifest,
+                &config.forbidden_words,
+                &config.forbidden_patterns,
+            ),
         ]
         .concat()),
         Err(error) => placed(

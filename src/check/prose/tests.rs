@@ -1,11 +1,11 @@
 use super::{Piece, check, forbidden};
-use crate::config::forbidden_words;
+use crate::config::{forbidden_patterns, forbidden_words};
 use rstest::rstest;
 
 /// Hits as `offset rule`.
 fn render(text: &str) -> Vec<String> {
     let listed = forbidden_words(&["NOTES.md", "AI", "it is worth noting", "x-x"], &[]);
-    check(text, &listed)
+    check(text, &listed, &[])
         .iter()
         .map(|hit| format!("{} {}", hit.offset, hit.rule.name()))
         .collect()
@@ -36,6 +36,88 @@ fn flags_dashes_emoji_and_forbidden_words(#[case] text: &str, #[case] expected: 
     assert_eq!(render(text), expected);
 }
 
+/// Hits as `offset rule` for one pattern over one text.
+fn pattern_hits(pattern: &str, text: &str) -> Vec<String> {
+    forbidden(
+        &[Piece { offset: 0, text }],
+        &[],
+        &forbidden_patterns(&[pattern]),
+    )
+    .iter()
+    .map(|hit| format!("{} {}", hit.offset, hit.rule.name()))
+    .collect()
+}
+
+/// - A pattern matches wherever it matches, word boundaries included in the pattern
+///   itself, so the shapes a whole-word list cannot express stay lintable.
+/// - A listed word never fires across a word character, so a trailing-hyphen entry such
+///   as `CORE-` cannot catch `CORE-23`; the pattern list exists for exactly that shape.
+#[rstest]
+#[case::ticket_id("CORE-\\d+", "see CORE-23 first", &["4 forbidden_pattern"])]
+#[case::the_word_form_stays_silent_without_its_digits("CORE-\\d+", "see CORE- first", &[])]
+#[case::every_occurrence("CORE-\\d+", "CORE-1 and CORE-2", &["0 forbidden_pattern", "11 forbidden_pattern"])]
+#[case::no_word_boundary_unless_the_pattern_asks("CORE-\\d+", "XCORE-23", &["1 forbidden_pattern"])]
+#[case::case_is_the_pattern_s_own_job(
+    "(?i)core-\\d+",
+    "core-7 CORE-7",
+    &["0 forbidden_pattern", "7 forbidden_pattern"],
+)]
+#[case::a_zero_width_only_pattern_reports_nothing("\\b", "x", &[])]
+#[case::a_multiline_pattern_matches_a_real_line_break("a\\nb", "x ax a\nb", &["5 forbidden_pattern"])]
+fn flags_by_pattern(#[case] pattern: &str, #[case] text: &str, #[case] expected: &[&str]) {
+    assert_eq!(pattern_hits(pattern, text), expected);
+}
+
+/// The joining line break between pieces stands for the real gap, so a pattern may match
+/// across the seam and still report at the match's own file offset.
+#[test]
+fn a_pattern_across_the_piece_seam_reports_at_its_own_offset() {
+    let pieces = [
+        Piece {
+            offset: 5,
+            text: "x a",
+        },
+        Piece {
+            offset: 30,
+            text: "b y",
+        },
+    ];
+    let offsets: Vec<usize> = forbidden(&pieces, &[], &forbidden_patterns(&["a\\nb"]))
+        .iter()
+        .map(|hit| hit.offset)
+        .collect();
+    assert_eq!(offsets, [7]);
+}
+
+#[test]
+fn forbidden_patterns_read_pieces_as_one_text_at_their_file_offsets() {
+    let pieces = [
+        Piece {
+            offset: 10,
+            text: " see CORE-23",
+        },
+        Piece {
+            offset: 40,
+            text: " and CORE-24",
+        },
+    ];
+    let offsets: Vec<usize> = forbidden(&pieces, &[], &forbidden_patterns(&["CORE-\\d+"]))
+        .iter()
+        .map(|hit| hit.offset)
+        .collect();
+    assert_eq!(offsets, [15, 45]);
+}
+
+/// The whole-word rule in one pin: a listed word never fires across a word character, so
+/// `CORE-` stays silent on `CORE-23` and the pattern list is the only way to catch it.
+#[test]
+fn a_listed_word_stays_silent_across_a_word_character() {
+    assert_eq!(
+        hits(&["CORE-"], &[], "see CORE-23 first"),
+        Vec::<String>::new()
+    );
+}
+
 #[test]
 fn forbidden_words_read_pieces_as_one_text_at_their_file_offsets() {
     let pieces = [
@@ -51,6 +133,7 @@ fn forbidden_words_read_pieces_as_one_text_at_their_file_offsets() {
     let offsets: Vec<usize> = forbidden(
         &pieces,
         &forbidden_words(&["AI", "it is worth noting"], &[]),
+        &[],
     )
     .iter()
     .map(|hit| hit.offset)
@@ -63,7 +146,7 @@ fn forbidden_words_read_pieces_as_one_text_at_their_file_offsets() {
 #[case::code_point_above_u_ffff("\u{1F600}", &["emoji U+1F600"])]
 #[case::em_dash("\u{2014}", &["em-dash (U+2014)"])]
 fn messages_name_the_code_point(#[case] text: &str, #[case] expected: &[&str]) {
-    let messages: Vec<String> = check(text, &[])
+    let messages: Vec<String> = check(text, &[], &[])
         .into_iter()
         .map(|hit| hit.message)
         .collect();
@@ -75,6 +158,7 @@ fn hits(exact: &[&str], insensitive: &[&str], text: &str) -> Vec<String> {
     forbidden(
         &[Piece { offset: 0, text }],
         &forbidden_words(exact, insensitive),
+        &[],
     )
     .iter()
     .map(|hit| format!("{} {}", hit.offset, hit.rule.name()))
@@ -136,6 +220,7 @@ fn messages_name_the_key_of_the_words_own_class(
     let messages: Vec<String> = forbidden(
         &[Piece { offset: 0, text }],
         &forbidden_words(exact, insensitive),
+        &[],
     )
     .iter()
     .map(|hit| hit.message.clone())

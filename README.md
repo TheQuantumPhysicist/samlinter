@@ -119,6 +119,7 @@ Rust sources are found the way the compiler finds them, not by listing directori
 | `em_dash` | U+2014 in a comment |
 | `emoji` | an emoji in a comment, one finding per visible emoji, at its first character |
 | `forbidden_word` | a configured word or phrase in a comment |
+| `forbidden_pattern` | a configured regex matched in a comment |
 | `library_subscriber` | a call that installs a log subscriber in a library's code, see below |
 | `path_attr` | each `path` attribute: `#[path = ".."]`, `#![path = ".."]` and a `path` inside `cfg_attr(..)`, see below |
 | `module_shape` | a file the walk reaches as `something.rs` that declares an out-of-line module, see below |
@@ -263,7 +264,7 @@ Cargo manifests:
 - `binary_readme`: the finding names the path the README belongs at.
 
 `README.md` in each package's directory, and at the root of a workspace with no root
-package: `em_dash`, `emoji`, `forbidden_word`.
+package: `em_dash`, `emoji`, `forbidden_word`, `forbidden_pattern`.
 
 Always on:
 
@@ -281,12 +282,13 @@ take about 5 s in a debug build.
 
 ## Configuration
 
-`samlinter.toml` sits at the workspace root. Every key but `exclude` is required; unknown keys
-are an error.
+`samlinter.toml` sits at the workspace root. Every key but `exclude` and `forbidden-patterns`
+is required; unknown keys are an error.
 
 ```toml
 forbidden-words = ["NOTES.md", "it is worth noting"]
 forbidden-words-insensitive = ["organise", "learnt"]
+forbidden-patterns = ["CORE-\\d+", "NEU-\\d+"]
 subscriber-crates = ["tracing-subscriber"]
 exclude = ["src/generated", "build/bindings.rs"]
 ```
@@ -296,6 +298,10 @@ exclude = ["src/generated", "build/bindings.rs"]
 - `forbidden-words-insensitive`: banned like `forbidden-words`, matched case-insensitively:
   any casing of an entry fires, a sentence start included. Spellings that must stay American
   go here.
+- `forbidden-patterns` (optional): regexes banned in the same places, each match a finding.
+  A regex matches wherever it matches; word boundaries are the pattern's own job (`\\b`),
+  and case-insensitivity is too (`(?i)`). A pattern that is not a valid regex, or matches
+  the empty string, is a config error.
 - The words of a phrase match across any whitespace run, line breaks included. Line comments
   of one kind on consecutive lines (`//`, `///` or `//!` in Rust, `#` in TOML) read as one
   text with their markers dropped, so a phrase wrapped onto the next comment line matches; a
@@ -329,7 +335,7 @@ Every exemption needs a reason, and is written in the kind of file its findings 
 
 - Rust: every rule with findings in Rust source, `rest_pattern`, `restricted_visibility`,
   `item_order`, `item_spacing`, `fn_spacing`, `em_dash`, `emoji`, `forbidden_word`,
-  `json_macro`, `library_subscriber`, `path_attr`, `module_shape`, `matches_macro`, `enum_is`,
+  `forbidden_pattern`, `json_macro`, `library_subscriber`, `path_attr`, `module_shape`, `matches_macro`, `enum_is`,
   `system_time_now`, `regex_use` and `direct_rng`, on the node that holds the finding. A comment that belongs to no node
   cannot be exempted (see below).
 - A member `Cargo.toml`: `member_version`.

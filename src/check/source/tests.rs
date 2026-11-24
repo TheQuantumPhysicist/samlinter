@@ -1,6 +1,6 @@
 use super::super::text_file;
 use super::{FileKind, Installs, check};
-use crate::config::{Config, forbidden_words};
+use crate::config::{Config, Settings, forbidden_words};
 use crate::workspace::{TestCode, TextFile};
 use ra_ap_syntax::Edition;
 use rstest::rstest;
@@ -18,6 +18,7 @@ fn findings_in(
     let file = text_file("src/lib.rs", text);
     let config = Config {
         forbidden_words: forbidden_words(&["NOTES.md", "AGENTS.md", "GPT", PHRASE], &[]),
+        forbidden_patterns: Vec::new(),
         subscriber_crates: Vec::new(),
     };
     check(&file, edition, &config, installs, kind, testness)
@@ -34,6 +35,36 @@ fn findings(text: &str) -> Vec<String> {
         TestCode::NotTest,
         text,
     )
+}
+
+/// A configured regex flags its match in a comment at the match's start, the shapes a
+/// whole-word list cannot express: `CORE-` never fires on `CORE-23` because the digit
+/// after the hyphen is a word character.
+#[test]
+fn a_pattern_flags_its_match_in_a_comment() {
+    let config = Settings::parse(
+        "forbidden-words = []\nforbidden-words-insensitive = []\nsubscriber-crates = []\nforbidden-patterns = [\"CORE-\\\\d+\"]\n",
+    )
+    .unwrap()
+    .config;
+    let file = text_file("src/lib.rs", "// see CORE-23 and CORE-24\nfn f() {}\n");
+    assert_eq!(
+        check(
+            &file,
+            Edition::Edition2024,
+            &config,
+            Installs::Allowed,
+            FileKind::ModRs,
+            TestCode::NotTest
+        )
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>(),
+        [
+            "src/lib.rs:1:8: forbidden_pattern: `CORE-\\d+` is listed in forbidden-patterns in samlinter.toml",
+            "src/lib.rs:1:20: forbidden_pattern: `CORE-\\d+` is listed in forbidden-patterns in samlinter.toml",
+        ]
+    );
 }
 
 /// `findings` for a file the walk reached as `something.rs`, not `something/mod.rs`.
@@ -465,6 +496,7 @@ fn module_shape_shows_the_display_path_not_the_real_one() {
     };
     let config = Config {
         forbidden_words: Vec::new(),
+        forbidden_patterns: Vec::new(),
         subscriber_crates: Vec::new(),
     };
     assert_eq!(

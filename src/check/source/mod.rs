@@ -111,7 +111,7 @@ fn comment_hits(root: &SyntaxNode, text: &str, config: &Config) -> Vec<Hit> {
         .chunk_by(|above, below| continues(text, above, below))
         .flat_map(|run| {
             let pieces: Vec<Piece> = run.iter().map(unmarked).collect();
-            prose::forbidden(&pieces, &config.forbidden_words)
+            prose::forbidden(&pieces, &config.forbidden_words, &config.forbidden_patterns)
         });
     marks.chain(words).collect()
 }

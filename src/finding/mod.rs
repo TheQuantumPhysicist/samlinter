@@ -32,6 +32,7 @@ pub enum Rule {
     EnumIs,
     FeatureFlags,
     FnSpacing,
+    ForbiddenPattern,
     ForbiddenWord,
     ItemOrder,
     ItemSpacing,
@@ -69,6 +70,7 @@ impl Rule {
             | Self::Emoji
             | Self::EnumIs
             | Self::FnSpacing
+            | Self::ForbiddenPattern
             | Self::ForbiddenWord
             | Self::ItemOrder
             | Self::ItemSpacing

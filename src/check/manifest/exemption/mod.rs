@@ -58,8 +58,7 @@ fn exemptions(root: &Table) -> Vec<Result<Exemption<'_>, Violation<'_>>> {
         .and_then(|package| package.get("metadata"))
         .and_then(Item::as_table_like)
         .and_then(|metadata| metadata.get_key_value("samlinter"))
-        .map(|(key, item)| samlinter_section(key, item))
-        .unwrap_or_default()
+        .map_or_else(Vec::new, |(key, item)| samlinter_section(key, item))
 }
 
 fn samlinter_section<'a>(

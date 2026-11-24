@@ -1,12 +1,12 @@
 # - Workspace facts samlinter cannot derive from `cargo metadata`.
-# - Every key but `exclude` is required; unknown keys are an error, so a typo cannot silently
-#   skip a check.
+# - Every key but `exclude` and `forbidden-patterns` is required; unknown keys are an
+#   error, so a typo cannot silently skip a check.
 # - No rule switches or severities: every finding fails the run.
 # - Exemptions live at the violation, never here:
 #   - Rust, every rule with findings in Rust source: rest_pattern, restricted_visibility,
-#     item_order, item_spacing, fn_spacing, em_dash, emoji, forbidden_word, json_macro,
-#     library_subscriber, path_attr, module_shape, matches_macro, enum_is, system_time_now,
-#     regex_use, direct_rng:
+#     item_order, item_spacing, fn_spacing, em_dash, emoji, forbidden_word,
+#     forbidden_pattern, json_macro, library_subscriber, path_attr, module_shape,
+#     matches_macro, enum_is, system_time_now, regex_use, direct_rng:
 #     #[cfg_attr(samlinter, expect(<rule>, reason = "<why>"))]
 #   - Cargo.toml: [package.metadata.samlinter.expect.member_version] with <dependency> = "<why>",
 #     or [package.metadata.samlinter.expect.feature_flags] with features = "<why>" for the
@@ -34,6 +34,14 @@ forbidden-words-insensitive = [
     "analyse", "analysed", "analysing", "optimise", "optimised", "optimising",
     "licence", "defence", "offence", "centre", "metre", "grey", "catalogue",
 ]
+
+# - Optional: regexes banned in the same places as the word lists, each match a finding
+#   (`forbidden_pattern`), at the match's first character.
+# - A regex matches wherever it matches; word boundaries are the pattern's own job (`\b`),
+#   and case-insensitivity is too (`(?i)`).
+# - A pattern that is not a valid regex, or matches the empty string, is an error, so a
+#   typo cannot silently disable the rule it was written for.
+# forbidden-patterns = ["CORE-\\d+", "NEU-\\d+"]
 
 # - Crates that install a log subscriber.
 # - Libraries only emit logs: in a package without a binary target that lists one as a

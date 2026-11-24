@@ -101,6 +101,7 @@ fn message_names_the_discard() {
 fn an_expect_does_not_lift_it() {
     let config = Config {
         forbidden_words: Vec::new(),
+        forbidden_patterns: Vec::new(),
         subscriber_crates: Vec::new(),
     };
     let text = "#[cfg_attr(samlinter, expect(discarded_result, reason = \"why\"))]\nfn f() {\n    let _ = g();\n}\n";

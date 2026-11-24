@@ -44,6 +44,7 @@ fn subscriber(section: Section) -> Dependency {
 fn config() -> Config {
     Config {
         forbidden_words: Vec::new(),
+        forbidden_patterns: Vec::new(),
         subscriber_crates: words(&["tracing-subscriber"]),
     }
 }

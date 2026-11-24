@@ -1,4 +1,4 @@
-use super::{Case, ExcludeEntry, Settings, Word, forbidden_words, words};
+use super::{Case, ExcludeEntry, ForbiddenPattern, Settings, Word, forbidden_words, words};
 use rstest::rstest;
 use std::fs;
 use std::path::Path;
@@ -26,6 +26,48 @@ fn accepts_empty_lists() {
     assert_eq!(settings.config.forbidden_words, Vec::new());
     assert_eq!(settings.config.subscriber_crates, Vec::new());
     assert_eq!(settings.exclude, Vec::new());
+}
+
+#[test]
+fn parses_forbidden_patterns() {
+    let config = Settings::parse(
+        "forbidden-words = []\nforbidden-words-insensitive = []\nsubscriber-crates = []\nforbidden-patterns = [\"CORE-\\\\d+\", \">>>\"]\n",
+    )
+    .unwrap()
+    .config;
+    let patterns: Vec<&str> = config
+        .forbidden_patterns
+        .iter()
+        .map(ForbiddenPattern::as_str)
+        .collect();
+    assert_eq!(patterns, ["CORE-\\d+", ">>>"]);
+}
+
+#[test]
+fn forbidden_patterns_are_optional() {
+    let config = Settings::parse(
+        "forbidden-words = []\nforbidden-words-insensitive = []\nsubscriber-crates = []\n",
+    )
+    .unwrap()
+    .config;
+    assert_eq!(config.forbidden_patterns, Vec::new());
+}
+
+/// A pattern that cannot match, or matches everywhere, is a config error, not a silent
+/// no-op: a typo in a regex must not disable the rule it was written for.
+#[rstest]
+#[case::invalid_regex("(core", "`forbidden-patterns` entry `(core` is not a valid regex: ")]
+#[case::matches_the_empty_string("a*", "`forbidden-patterns` entry `a*` matches the empty string")]
+fn rejects_patterns_that_cannot_match_a_span(#[case] pattern: &str, #[case] expected: &str) {
+    let error = Settings::parse(&format!(
+        "forbidden-words = []\nforbidden-words-insensitive = []\nsubscriber-crates = []\nforbidden-patterns = [\"{pattern}\"]\n",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.starts_with(expected),
+        "expected prefix `{expected}`, got `{error}`"
+    );
 }
 
 #[test]
@@ -87,7 +129,7 @@ const BAD_ENTRY: &str = "entries must be non-empty, without surrounding whitespa
 #[rstest]
 #[case::unknown_key(
     "forbidden-words = []\nforbidden-words-insensitive = []\nsubscriber-crates = []\nseverity = \"warn\"\n",
-    "TOML parse error at line 4, column 1\n  |\n4 | severity = \"warn\"\n  | ^^^^^^^^\nunknown field `severity`, expected one of `forbidden-words`, `forbidden-words-insensitive`, `subscriber-crates`, `exclude`\n"
+    "TOML parse error at line 4, column 1\n  |\n4 | severity = \"warn\"\n  | ^^^^^^^^\nunknown field `severity`, expected one of `forbidden-words`, `forbidden-words-insensitive`, `forbidden-patterns`, `subscriber-crates`, `exclude`\n"
 )]
 #[case::missing_subscriber_crates(
     "forbidden-words = []\nforbidden-words-insensitive = []\n",

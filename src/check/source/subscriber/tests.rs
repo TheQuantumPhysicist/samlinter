@@ -164,6 +164,7 @@ fn dependency(crate_name: &str, section: Section) -> Dependency {
 fn subscribers(configured: &str) -> Config {
     Config {
         forbidden_words: Vec::new(),
+        forbidden_patterns: Vec::new(),
         subscriber_crates: words(&[configured]),
     }
 }

@@ -87,6 +87,7 @@ fn message_names_the_macro() {
 fn exempted_with_an_expect_on_the_function() {
     let config = Config {
         forbidden_words: Vec::new(),
+        forbidden_patterns: Vec::new(),
         subscriber_crates: Vec::new(),
     };
     let file = super::super::super::text_file(

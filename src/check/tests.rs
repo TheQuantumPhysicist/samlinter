@@ -82,6 +82,7 @@ fn marked_workspace(edition: Edition, test: TestCode, source: &str) -> Workspace
 fn config() -> Config {
     Config {
         forbidden_words: forbidden_words(&["NOTES.md"], &[]),
+        forbidden_patterns: Vec::new(),
         subscriber_crates: Vec::new(),
     }
 }

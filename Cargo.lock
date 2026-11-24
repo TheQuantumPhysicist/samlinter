@@ -455,6 +455,7 @@ dependencies = [
  "anyhow",
  "cargo_metadata",
  "ra_ap_syntax",
+ "regex",
  "rstest",
  "serde",
  "strum",

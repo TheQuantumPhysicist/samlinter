@@ -1,6 +1,6 @@
 mod emoji;
 
-use crate::config::{Case, ForbiddenWord};
+use crate::config::{Case, ForbiddenPattern, ForbiddenWord};
 use crate::finding::{Hit, Rule};
 
 const EM_DASH: char = '\u{2014}';
@@ -14,10 +14,14 @@ pub struct Piece<'a> {
 }
 
 /// Checks a whole documentation file.
-pub fn check(text: &str, forbidden_words: &[ForbiddenWord]) -> Vec<Hit> {
+pub fn check(
+    text: &str,
+    forbidden_words: &[ForbiddenWord],
+    forbidden_patterns: &[ForbiddenPattern],
+) -> Vec<Hit> {
     let piece = Piece { offset: 0, text };
     marks(piece)
-        .chain(forbidden(&[piece], forbidden_words))
+        .chain(forbidden(&[piece], forbidden_words, forbidden_patterns))
         .collect()
 }
 
@@ -41,7 +45,14 @@ pub fn marks(piece: Piece) -> impl Iterator<Item = Hit> {
 /// - Forbidden-word hits in `pieces` read as one text, a line break joining each piece to
 ///   the next.
 /// - Each hit sits at its first character's byte offset in the file.
-pub fn forbidden(pieces: &[Piece], forbidden_words: &[ForbiddenWord]) -> Vec<Hit> {
+/// - Forbidden-pattern hits: every non-empty regex match, wherever it matches; word
+///   boundaries are the pattern's own job, since a pattern exists exactly when the
+///   whole-word rule cannot express the shape.
+pub fn forbidden(
+    pieces: &[Piece],
+    forbidden_words: &[ForbiddenWord],
+    forbidden_patterns: &[ForbiddenPattern],
+) -> Vec<Hit> {
     let joined = pieces
         .iter()
         .map(|piece| piece.text)
@@ -64,6 +75,32 @@ pub fn forbidden(pieces: &[Piece], forbidden_words: &[ForbiddenWord]) -> Vec<Hit
         })
         .collect();
 
+    // Every char boundary of `joined` as (offset in `joined`, offset in the file): the
+    // pieces' own, plus each piece's end, where the joining line break sits and a regex
+    // match may start.
+    let mut boundaries: Vec<(usize, usize)> = Vec::new();
+    let mut joined_at = 0;
+    for piece in pieces {
+        boundaries.extend(
+            piece
+                .text
+                .char_indices()
+                .map(|(at, _)| (joined_at + at, piece.offset + at)),
+        );
+        boundaries.push((
+            joined_at + piece.text.len(),
+            piece.offset + piece.text.len(),
+        ));
+        joined_at += piece.text.len() + 1;
+    }
+    let file_at = |at: usize| {
+        let index = boundaries.partition_point(|&(boundary, _)| boundary < at);
+        boundaries
+            .get(index)
+            .expect("a regex match starts at a char boundary of the joined text")
+            .1
+    };
+
     forbidden_words
         .iter()
         .flat_map(|listed| {
@@ -80,6 +117,25 @@ pub fn forbidden(pieces: &[Piece], forbidden_words: &[ForbiddenWord]) -> Vec<Hit
                 })
                 .collect::<Vec<_>>()
         })
+        .chain(forbidden_patterns.iter().flat_map(|listed| {
+            let pattern = listed.as_str();
+            listed
+                .regex()
+                .find_iter(&joined)
+                // A zero-width match has no span to report and no position to point at.
+                .filter(|found| !found.is_empty())
+                .map(move |found| {
+                    Hit::new(
+                        file_at(found.start()),
+                        Rule::ForbiddenPattern,
+                        format!(
+                            "`{pattern}` is listed in {} in samlinter.toml",
+                            ForbiddenPattern::KEY
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>()
+        }))
         .collect()
 }
 

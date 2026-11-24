@@ -1,4 +1,12 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+#[cfg_attr(
+    samlinter,
+    expect(
+        regex_use,
+        reason = "the linter itself needs the regex crate to match the user's configured `forbidden-patterns`"
+    )
+)]
+use regex::Regex;
 use serde::Deserialize;
 use std::path::{Component, Path};
 
@@ -10,6 +18,12 @@ pub struct Config {
     /// - The words of a phrase match across any whitespace run, so a phrase wrapped across
     ///   lines or consecutive line comments still matches.
     pub forbidden_words: Vec<ForbiddenWord>,
+    /// - Regexes banned in comments, Rust and TOML, and README files, compiled at parse so
+    ///   a pattern that cannot match a span is a config error, never a silent no-op.
+    /// - A regex matches wherever it matches; word boundaries are the pattern's own job
+    ///   (`\b`), because a pattern exists exactly when the word boundary rule cannot
+    ///   express the shape, such as `CORE-\d+`.
+    pub forbidden_patterns: Vec<ForbiddenPattern>,
     /// - Crates that install a log subscriber.
     /// - A package without a binary target that lists one as a regular dependency gets its
     ///   library code checked: each install call there (`.init()`, `set_global_default(..)`,
@@ -27,12 +41,14 @@ pub struct Settings {
 }
 
 /// `samlinter.toml` as written: workspace facts samlinter cannot derive; every key but
-/// `exclude` is required.
+/// `exclude` and `forbidden-patterns` is required.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct File {
     forbidden_words: Vec<Word>,
     forbidden_words_insensitive: Vec<Word>,
+    #[serde(default)]
+    forbidden_patterns: Vec<Word>,
     subscriber_crates: Vec<Word>,
     #[serde(default)]
     exclude: Vec<ExcludeEntry>,
@@ -43,9 +59,14 @@ impl Settings {
         let File {
             forbidden_words,
             forbidden_words_insensitive,
+            forbidden_patterns,
             subscriber_crates,
             exclude,
         } = toml_edit::de::from_str(text)?;
+        let forbidden_patterns = forbidden_patterns
+            .into_iter()
+            .map(ForbiddenPattern::compile)
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             config: Config {
                 forbidden_words: forbidden_words
@@ -57,6 +78,7 @@ impl Settings {
                             .map(|word| listed_word(word, Case::Insensitive)),
                     )
                     .collect(),
+                forbidden_patterns,
                 subscriber_crates,
             },
             exclude,
@@ -66,6 +88,57 @@ impl Settings {
 
 const fn listed_word(word: Word, case: Case) -> ForbiddenWord {
     ForbiddenWord { word, case }
+}
+
+/// A forbidden regex with the text it was listed as, compiled once at parse.
+#[derive(Debug)]
+pub struct ForbiddenPattern {
+    pattern: Word,
+    regex: Regex,
+}
+/// The listed text decides identity: the same text compiles to the same regex.
+impl PartialEq for ForbiddenPattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern
+    }
+}
+
+impl ForbiddenPattern {
+    /// The key that lists patterns in samlinter.toml.
+    pub const KEY: &str = "forbidden-patterns";
+
+    #[cfg_attr(
+        samlinter,
+        expect(
+            regex_use,
+            reason = "the linter itself needs the regex crate to match the user's configured `forbidden-patterns`"
+        )
+    )]
+    fn compile(pattern: Word) -> Result<Self> {
+        let regex = Regex::new(pattern.as_str()).map_err(|error| {
+            anyhow!(
+                "`{key}` entry `{entry}` is not a valid regex: {error}",
+                key = Self::KEY,
+                entry = pattern.as_str(),
+            )
+        })?;
+        if regex.is_match("") {
+            return Err(anyhow!(
+                "`{key}` entry `{entry}` matches the empty string",
+                key = Self::KEY,
+                entry = pattern.as_str(),
+            ));
+        }
+        Ok(Self { pattern, regex })
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.pattern.as_str()
+    }
+
+    pub const fn regex(&self) -> &Regex {
+        &self.regex
+    }
 }
 
 /// - A forbidden word with the case class of the key it was listed under.
@@ -197,6 +270,17 @@ fn test_word(entry: &str, case: Case) -> ForbiddenWord {
         word: Word::try_from(entry.to_owned()).unwrap(),
         case,
     }
+}
+
+/// `entries` as compiled forbidden patterns; each must be valid.
+#[cfg(test)]
+pub fn forbidden_patterns(entries: &[&str]) -> Vec<ForbiddenPattern> {
+    entries
+        .iter()
+        .map(|entry| {
+            ForbiddenPattern::compile(Word::try_from((*entry).to_owned()).unwrap()).unwrap()
+        })
+        .collect()
 }
 
 #[cfg(test)]

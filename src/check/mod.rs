@@ -47,6 +47,7 @@ pub fn run(workspace: &Workspace) -> Result<Vec<Finding>> {
         .chain(toml_comments::check(
             &workspace.config,
             &config.forbidden_words,
+            &config.forbidden_patterns,
         ))
         .filter(|finding| !workspace.excludes(&finding.path))
         .collect();
@@ -93,10 +94,14 @@ fn package_files(package: &Package, config: &Config, gate: &Gate) -> Vec<Finding
 
 fn readme_findings(readme: &Readme, config: &Config) -> Vec<Finding> {
     match readme {
-        Readme::Found(readme) => prose::check(&readme.text, &config.forbidden_words)
-            .into_iter()
-            .map(|hit| hit.into_finding(&readme.shown, &readme.text))
-            .collect(),
+        Readme::Found(readme) => prose::check(
+            &readme.text,
+            &config.forbidden_words,
+            &config.forbidden_patterns,
+        )
+        .into_iter()
+        .map(|hit| hit.into_finding(&readme.shown, &readme.text))
+        .collect(),
         Readme::Missing { expected: _ } => Vec::new(),
     }
 }

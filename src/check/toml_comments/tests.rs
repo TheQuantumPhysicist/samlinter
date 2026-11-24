@@ -8,6 +8,7 @@ fn comments(text: &str) -> Vec<String> {
     render(&check(
         &text_file("Cargo.toml", text),
         &forbidden_words(&["NOTES.md", "it is worth noting"], &[]),
+        &[],
     ))
 }
 

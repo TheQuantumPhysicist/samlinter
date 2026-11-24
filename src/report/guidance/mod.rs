@@ -53,6 +53,7 @@ impl Guidance {
             Rule::EnumIs => ENUM_IS,
             Rule::FeatureFlags => FEATURE_FLAGS,
             Rule::FnSpacing => FN_SPACING,
+            Rule::ForbiddenPattern => FORBIDDEN_PATTERN,
             Rule::ForbiddenWord => FORBIDDEN_WORD,
             Rule::ItemOrder => ITEM_ORDER,
             Rule::ItemSpacing => ITEM_SPACING,
@@ -207,6 +208,23 @@ const FN_SPACING: Text = Text {
     bad_fixes: &["Do not use a comment line as the separator; it has to be a blank line."],
 };
 
+const FORBIDDEN_PATTERN: Text = Text {
+    why: &[
+        "The project lists this regex under `forbidden-patterns` in samlinter.toml because everything it matches must stay out of comments and README files.",
+        "Typical entries catch ticket or issue references (`CORE-\\d+`), URLs, or marker shapes that leak from one system into another.",
+        "A regex matches wherever it matches; word boundaries are the pattern's own job (`\\b`). The word lists cannot express these shapes: a listed word must stand alone between non-word characters, so an entry like `CORE-` never fires on `CORE-23`, because the digit after the hyphen is a word character.",
+    ],
+    fix: &[
+        "State the reasoning itself: the constraint, decision or invariant the reference stood for.",
+        "If the comment only pointed at the ticket or resource, delete it or replace it with the one fact the reader needs.",
+    ],
+    bad_fixes: &[
+        "Do not alter the text to slip past the regex (`CORE 23`, `C0RE-23`); the reference explains nothing however it is spelled.",
+        "Do not exempt the comment instead of rewriting it; an exemption is no substitute for removing the reference.",
+        "Do not widen the pattern in samlinter.toml to catch workarounds; a pattern that matches whole sentences buries the findings that matter.",
+    ],
+};
+
 const FORBIDDEN_WORD: Text = Text {
     why: &[
         "The project lists this word or phrase under `forbidden-words` or `forbidden-words-insensitive` in samlinter.toml because it must not appear in comments or README files.",
@@ -290,7 +308,7 @@ const LIBRARY_SUBSCRIBER: Text = Text {
 const MALFORMED_EXEMPTION: Text = Text {
     why: &[
         "An exemption must name exactly which rule it lifts and why, so a reviewer can judge it. A malformed exemption exempts nothing.",
-        "Every rule with findings in Rust source accepts an exemption on the node that holds the finding: `rest_pattern`, `restricted_visibility`, `item_order`, `item_spacing`, `fn_spacing`, `em_dash`, `emoji`, `forbidden_word`, `json_macro`, `library_subscriber`, `path_attr`, `module_shape`, `matches_macro`, `enum_is`, `system_time_now`, `regex_use` and `direct_rng`. Of the manifest rules, `member_version` (keyed by dependency) and `feature_flags` (keyed by the `[features]` table or an optional dependency's name) do. Syntax errors and the exemption rules never do, so an exemption cannot hide itself.",
+        "Every rule with findings in Rust source accepts an exemption on the node that holds the finding: `rest_pattern`, `restricted_visibility`, `item_order`, `item_spacing`, `fn_spacing`, `em_dash`, `emoji`, `forbidden_word`, `forbidden_pattern`, `json_macro`, `library_subscriber`, `path_attr`, `module_shape`, `matches_macro`, `enum_is`, `system_time_now`, `regex_use` and `direct_rng`. Of the manifest rules, `member_version` (keyed by dependency) and `feature_flags` (keyed by the `[features]` table or an optional dependency's name) do. Syntax errors and the exemption rules never do, so an exemption cannot hide itself.",
         "Comment rule findings in Cargo.toml, samlinter.toml and README files cannot be exempted: no attribute can sit there. Neither can a Rust comment that belongs to no node.",
     ],
     fix: &[
