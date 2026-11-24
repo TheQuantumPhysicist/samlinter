@@ -20,12 +20,13 @@ serde = { version = "1.0", features = ["derive"] }
 strum = { version = "0.28", features = ["derive"] }
 toml_edit = { version = "0.25", features = ["serde"] }
 toml_parser = "1.1"
-unicode-properties = { version = "0.1", default-features = false, features = ["emoji"] }
+unicode-properties = { version = "=0.1.4", default-features = false, features = ["emoji"] }
 
 # The rust-analyzer parser snapshot is locked: 0.0.x releases are incompatible with each
 # other, so the patch must stay fixed.
 [package.metadata.samlinter.expect.patch_version]
 ra_ap_syntax = "the parser snapshot must stay locked: 0.0.x releases are incompatible"
+unicode-properties = "the locked parser snapshot pins unicode-ident 1.0.24 (Unicode 17); 0.1.5 is Unicode 18 and the lexer asserts both tables agree"
 
 [dev-dependencies]
 rstest = "0.28"
