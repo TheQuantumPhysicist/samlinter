@@ -64,6 +64,7 @@ impl Guidance {
             Rule::MemberVersion => MEMBER_VERSION,
             Rule::ModuleShape => MODULE_SHAPE,
             Rule::PanicStrategy => PANIC_STRATEGY,
+            Rule::PatchVersion => PATCH_VERSION,
             Rule::PathAttr => PATH_ATTR,
             Rule::RegexUse => REGEX_USE,
             Rule::RestPattern => REST_PATTERN,
@@ -308,7 +309,7 @@ const LIBRARY_SUBSCRIBER: Text = Text {
 const MALFORMED_EXEMPTION: Text = Text {
     why: &[
         "An exemption must name exactly which rule it lifts and why, so a reviewer can judge it. A malformed exemption exempts nothing.",
-        "Every rule with findings in Rust source accepts an exemption on the node that holds the finding: `rest_pattern`, `restricted_visibility`, `item_order`, `item_spacing`, `fn_spacing`, `em_dash`, `emoji`, `forbidden_word`, `forbidden_pattern`, `json_macro`, `library_subscriber`, `path_attr`, `module_shape`, `matches_macro`, `enum_is`, `system_time_now`, `regex_use` and `direct_rng`. Of the manifest rules, `member_version` (keyed by dependency) and `feature_flags` (keyed by the `[features]` table or an optional dependency's name) do. Syntax errors and the exemption rules never do, so an exemption cannot hide itself.",
+        "Every rule with findings in Rust source accepts an exemption on the node that holds the finding: `rest_pattern`, `restricted_visibility`, `item_order`, `item_spacing`, `fn_spacing`, `em_dash`, `emoji`, `forbidden_word`, `forbidden_pattern`, `json_macro`, `library_subscriber`, `path_attr`, `module_shape`, `matches_macro`, `enum_is`, `system_time_now`, `regex_use` and `direct_rng`. Of the manifest rules, `member_version` (keyed by dependency), `patch_version` (keyed by dependency) and `feature_flags` (keyed by the `[features]` table or an optional dependency's name) do. Syntax errors and the exemption rules never do, so an exemption cannot hide itself.",
         "Comment rule findings in Cargo.toml, samlinter.toml and README files cannot be exempted: no attribute can sit there. Neither can a Rust comment that belongs to no node.",
     ],
     fix: &[
@@ -316,6 +317,7 @@ const MALFORMED_EXEMPTION: Text = Text {
         "Rust accepts no attribute on an assignment: exempt a destructuring assignment such as `(a, ..) = t;` on a block around it or on the enclosing function.",
         "Exempt `member_version` in the member's Cargo.toml only: write `[package.metadata.samlinter.expect.member_version]` with `<dependency> = \"<why>\"`.",
         "Exempt `feature_flags` in any package manifest, the root package's included (a virtual root has no `[package]` table): write `[package.metadata.samlinter.expect.feature_flags]` with `features = \"<why>\"` for the `[features]` table, or with the optional dependency's name for a dependency with `optional = true`.",
+        "Exempt `patch_version` in any package manifest, or in the root's `[workspace.metadata]`: write `[package.metadata.samlinter.expect.patch_version]` with `<dependency> = \"<why the patch stays locked>\"`.",
         "If the rule accepts no exemption, delete the exemption and fix the code.",
     ],
     bad_fixes: &[
@@ -366,6 +368,22 @@ const PANIC_STRATEGY: Text = Text {
     bad_fixes: &[
         "Do not set it for release only.",
         "Do not wrap production code in `catch_unwind` to keep running after a panic.",
+    ],
+};
+
+const PATCH_VERSION: Text = Text {
+    why: &[
+        "The `patch_version` rule fires on a dependency requirement that names a patch, because the project lists dependency versions with the patch part left off: a `cargo update` then picks up patch fixes of a compatible release without a manifest edit.",
+        "A requirement with three numeric parts (`0.28.0`, `=0.0.360`, `>=1.2.3, <2`) names a patch; one or two (`0`, `0.28`) let every compatible patch flow.",
+        "Word boundaries and case are cargo's semantics, not the linter's: the rule reads the requirement's first dotted run of digits, an operator or prerelease included.",
+    ],
+    fix: &[
+        "Write the major alone (`1`) or the major and minor (`1.2`); a wildcard patch (`1.2.*`) names no patch either.",
+        "When the patch must stay locked (a parser snapshot that only compiles against itself), exempt the dependency with the project owner's approval: `[package.metadata.samlinter.expect.patch_version]` (or the root's `[workspace.metadata.samlinter.expect.patch_version]`) with `<dependency> = \"<why the patch stays locked>\"`.",
+    ],
+    bad_fixes: &[
+        "Do not move the dependency to git or a path to dodge the version; the requirement then pins nothing and updates nothing.",
+        "Do not exempt the dependency without the project owner's approval.",
     ],
 };
 

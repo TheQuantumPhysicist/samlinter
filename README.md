@@ -254,10 +254,19 @@ Cargo manifests:
 | Rule | Flags |
 | --- | --- |
 | `member_version` | a version requirement outside the root manifest |
+| `patch_version` | a dependency requirement that names a patch, `0.28.0` in any form, see below |
 | `workspace_dependency_form` | `x.workspace = true` or a `[dependencies.x]` table with `workspace = true`, instead of `x = { workspace = true }` |
 | `feature_flags` | a `[features]` table, or a dependency with `optional = true`, which cargo turns into a feature |
 | `panic_strategy` | a root manifest whose `[profile.dev]` or `[profile.release]` is missing or does not set `panic = "abort"` |
 | `binary_readme` | a package with a binary target and no `README.md` in its package directory |
+
+- `patch_version`: a requirement with three numeric parts names a patch: `0.28.0`, an
+  operator form (`=0.0.360`, `>=1.2.3, <2`) or a prerelease (`1.2.3-beta.1`). One or two
+  parts (`0`, `0.28`), a wildcard patch (`1.2.*`) and `*` let patch updates flow. The rule
+  reads the dependency tables of every manifest, the root `[workspace.dependencies]`
+  included; the package's own `[package] version` is not a requirement.
+- `patch_version`: when the patch must stay locked (a parser snapshot that only compiles
+  against itself), exempt the dependency, see Exemptions.
 
 - `binary_readme`: `README.md` follows the same nothing-there rule as module files; a
   `README.md` directory is an error.
@@ -339,9 +348,9 @@ Every exemption needs a reason, and is written in the kind of file its findings 
   `system_time_now`, `regex_use` and `direct_rng`, on the node that holds the finding. A comment that belongs to no node
   cannot be exempted (see below).
 - A member `Cargo.toml`: `member_version`.
-- A package `Cargo.toml`, a member's or the root package's: `feature_flags`. A virtual root
-  has no `[package]` table to write the exemption in, so its `[features]` table, if any,
-  cannot be exempted.
+- A package `Cargo.toml`, a member's or the root package's, or the root's
+  `[workspace.metadata]` (a virtual root has no `[package]` table): `patch_version` and
+  `feature_flags`.
 - Nowhere: `syntax_error`, `discarded_result`, `malformed_exemption`,
   `unfulfilled_exemption` and the other Cargo.toml rules. Comment findings in `Cargo.toml`,
   `samlinter.toml` and README files cannot be exempted either: no attribute can sit there.
@@ -378,7 +387,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(samlinter)"] }
 
 In a member's `Cargo.toml`, a `member_version` exemption names the dependency; a
 `feature_flags` exemption, in a member's or the root package's, names the `[features]` table
-or the optional dependency:
+or the optional dependency; a `patch_version` exemption names the dependency, in a package
+manifest or in the root's `[workspace.metadata]`:
 
 ```toml
 [package.metadata.samlinter.expect.member_version]
@@ -386,6 +396,9 @@ rand = "rand serves only this crate's business case"
 
 [package.metadata.samlinter.expect.feature_flags]
 features = "the feature only exposes this crate's test helpers, gated as cfg(any(test, feature = ..))"
+
+[workspace.metadata.samlinter.expect.patch_version]
+ra_ap_syntax = "the parser snapshot must stay locked: 0.0.x releases are incompatible"
 ```
 
 An exemption that matches nothing is itself a finding, so stale exemptions cannot pile up.

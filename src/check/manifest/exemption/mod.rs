@@ -3,9 +3,9 @@ use super::{FixedRule, Kind, Violation, entries};
 use crate::finding::{Exemptability, ManifestExemptable, Rule};
 use toml_edit::{Item, Key, Table};
 
-/// An entry of `[package.metadata.samlinter.expect.<rule>]`: the name the violation sits at
-/// (a dependency for `member_version`; the `[features]` table or the optional dependency's
-/// name for `feature_flags`) -> reason.
+/// An entry of a `[package|workspace].metadata.samlinter.expect.<rule>]` table: the name
+/// the violation sits at (a dependency for `member_version` and `patch_version`; the
+/// `[features]` table or the optional dependency's name for `feature_flags`) -> reason.
 struct Exemption<'a> {
     rule: ManifestExemptable,
     key: &'a Key,
@@ -39,29 +39,52 @@ impl<'a> Exemption<'a> {
     }
 }
 
-/// - Drops violations covered by a `[package.metadata.samlinter.expect.<rule>]` entry.
+/// - Drops violations covered by an `expect.<rule>` entry under the package's or the
+///   workspace's `[..].metadata.samlinter` table.
 /// - Adds a violation for each malformed entry and for each entry that matched nothing.
 pub fn apply<'a>(root: &'a Table, violations: Vec<Violation<'a>>) -> Vec<Violation<'a>> {
     apply_exemptions(
         violations,
         exemptions(root),
         Exemption::covers,
-        // TOML keys are unique, so at most one entry covers a violation: no width to compare.
+        // Two entries can cover one violation: the same dependency exempted under both
+        // metadata surfaces. With unit width the first listed gets the credit and the
+        // duplicate reads as unfulfilled, the ruled outcome for a repeated exemption.
         |_| (),
         Exemption::unfulfilled,
     )
 }
 
 fn exemptions(root: &Table) -> Vec<Result<Exemption<'_>, Violation<'_>>> {
+    let package = package_exemptions(root);
+    let workspace = workspace_exemptions(root);
+    package.into_iter().chain(workspace).collect()
+}
+
+fn package_exemptions(root: &Table) -> Vec<Result<Exemption<'_>, Violation<'_>>> {
     root.get("package")
         .and_then(Item::as_table_like)
         .and_then(|package| package.get("metadata"))
         .and_then(Item::as_table_like)
         .and_then(|metadata| metadata.get_key_value("samlinter"))
-        .map_or_else(Vec::new, |(key, item)| samlinter_section(key, item))
+        .map_or_else(Vec::new, |(key, item)| {
+            samlinter_section("package", key, item)
+        })
+}
+
+fn workspace_exemptions(root: &Table) -> Vec<Result<Exemption<'_>, Violation<'_>>> {
+    root.get("workspace")
+        .and_then(Item::as_table_like)
+        .and_then(|workspace| workspace.get("metadata"))
+        .and_then(Item::as_table_like)
+        .and_then(|metadata| metadata.get_key_value("samlinter"))
+        .map_or_else(Vec::new, |(key, item)| {
+            samlinter_section("workspace", key, item)
+        })
 }
 
 fn samlinter_section<'a>(
+    surface: &str,
     key: &'a Key,
     item: &'a Item,
 ) -> Vec<Result<Exemption<'a>, Violation<'a>>> {
@@ -81,7 +104,7 @@ fn samlinter_section<'a>(
             .collect(),
         None => vec![Err(malformed(
             key,
-            "`[package.metadata.samlinter]` must be a table",
+            format!("`[{surface}.metadata.samlinter]` must be a table"),
         ))],
     }
 }

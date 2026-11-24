@@ -9,6 +9,8 @@
 #     matches_macro, enum_is, system_time_now, regex_use, direct_rng:
 #     #[cfg_attr(samlinter, expect(<rule>, reason = "<why>"))]
 #   - Cargo.toml: [package.metadata.samlinter.expect.member_version] with <dependency> = "<why>",
+#     [package.metadata.samlinter.expect.patch_version] (or the root's
+#     [workspace.metadata.samlinter.expect.patch_version]) with <dependency> = "<why>",
 #     or [package.metadata.samlinter.expect.feature_flags] with features = "<why>" for the
 #     `[features]` table, or <dependency> = "<why>" for an optional dependency
 #   - discarded_result accepts no expect attribute; an exemption naming it is a

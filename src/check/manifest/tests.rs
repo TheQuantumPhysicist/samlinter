@@ -296,6 +296,106 @@ fn member_version_exemption_names_the_dependency(#[case] text: &str, #[case] exp
     assert_eq!(library_member(text), expected);
 }
 
+/// Each case's manifest gets the panic profiles the root role demands, and its expected
+/// line numbers count from there.
+fn root_package_findings(text: &str) -> Vec<String> {
+    let manifest = format!("{PROFILES}\n{text}");
+    let package = package(&manifest, PackageKind::Binary, README, Vec::new());
+    render(&check(&Role::RootPackage(&package), &config()).unwrap())
+}
+
+/// - A dependency requirement that names a patch (`0.28.0`, any operator or prerelease
+///   included) is a `patch_version` violation; one or two numeric parts are fine.
+/// - The package's own `[package] version` is a version, not a requirement, and stays free.
+#[rstest]
+#[case::in_workspace_dependencies(
+    "[workspace.dependencies]\nrstest = \"0.28.0\"\n",
+    &["8:1 patch_version"]
+)]
+#[case::in_a_root_package_dependency(
+    "[dependencies]\nrstest = \"0.28.0\"\n",
+    &["8:1 patch_version"]
+)]
+#[case::two_components_flow(
+    "[workspace.dependencies]\nrstest = \"0.28\"\n",
+    &[]
+)]
+#[case::one_component_flows(
+    "[workspace.dependencies]\nanyhow = \"1\"\n",
+    &[]
+)]
+#[case::a_wildcard_patch_names_no_patch(
+    "[workspace.dependencies]\nrstest = \"1.2.*\"\n",
+    &[]
+)]
+#[case::a_prerelease_names_a_patch(
+    "[workspace.dependencies]\nrstest = \"1.2.3-beta.1\"\n",
+    &["8:1 patch_version"]
+)]
+#[case::an_exact_operator_pins_the_patch(
+    "[workspace.dependencies]\nparser = \"=0.0.360\"\n",
+    &["8:1 patch_version"]
+)]
+#[case::a_comparator_with_three_parts(
+    "[workspace.dependencies]\nrstest = \">=1.2.3, <2\"\n",
+    &["8:1 patch_version"]
+)]
+#[case::the_package_version_is_not_a_requirement(
+    "[package]\nversion = \"0.1.6\"\n",
+    &[]
+)]
+#[case::a_path_dependency_names_no_version(
+    "[dependencies]\nlocal = { path = \"../local\" }\n",
+    &[]
+)]
+#[case::an_inherited_dependency_names_no_version(
+    "[dependencies]\nrstest = { workspace = true }\n",
+    &[]
+)]
+#[case::a_version_field_in_an_inline_table(
+    "[dependencies]\nrstest = { version = \"0.28.0\" }\n",
+    &["8:1 patch_version"]
+)]
+#[case::a_version_field_in_a_table(
+    "[dependencies.rstest]\nversion = \"0.28.0\"\n",
+    &["7:15 patch_version"]
+)]
+#[case::a_target_dependency(
+    "[target.'cfg(unix)'.dependencies]\nlibc = \"0.2.11\"\n",
+    &["8:1 patch_version"]
+)]
+fn patch_versions_are_violations_where_requirements_live(
+    #[case] text: &str,
+    #[case] expected: &[&str],
+) {
+    assert_eq!(root_package_findings(text), expected);
+}
+
+#[test]
+fn a_member_declaration_violates_both_its_rules() {
+    assert_eq!(
+        library_member("[dependencies]\nrstest = \"0.28.0\"\n"),
+        ["2:1 patch_version", "2:1 member_version"]
+    );
+}
+
+#[rstest]
+#[case::in_the_root_package(
+    "[package.metadata.samlinter.expect.patch_version]\nparser = \"the parser snapshot is locked: 0.0.x releases are incompatible\"\n\n[dependencies]\nparser = \"=0.0.360\"\n",
+    &[]
+)]
+#[case::in_the_workspace_metadata(
+    "[workspace.metadata.samlinter.expect.patch_version]\nrstest = \"why\"\n\n[workspace.dependencies]\nrstest = \"0.28.0\"\n",
+    &[]
+)]
+#[case::unfulfilled(
+    "[package.metadata.samlinter.expect.patch_version]\nserde = \"why\"\n\n[dependencies]\nrstest = \"0.28.0\"\n",
+    &["11:1 patch_version", "8:1 unfulfilled_exemption"]
+)]
+fn patch_version_exemptions_name_the_dependency(#[case] text: &str, #[case] expected: &[&str]) {
+    assert_eq!(root_package_findings(text), expected);
+}
+
 #[rstest]
 #[case::the_features_table(
     "[features]\nfast = []\n\n[package.metadata.samlinter.expect.feature_flags]\nfeatures = \"why\"\n",

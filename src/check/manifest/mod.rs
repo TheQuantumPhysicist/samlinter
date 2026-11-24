@@ -163,7 +163,7 @@ impl Entry<'_> {
 #[derive(Clone, Copy)]
 enum Declaration<'a> {
     /// `name = "<version requirement>"`
-    Version,
+    Version(&'a str),
     /// `name = { ... }`
     Inline(&'a dyn TableLike),
     /// `[dependencies.name]`, or dotted keys such as `name.workspace = true`.
@@ -173,9 +173,9 @@ enum Declaration<'a> {
 }
 
 impl<'a> Declaration<'a> {
-    const fn of(item: &'a Item) -> Self {
+    fn of(item: &'a Item) -> Self {
         match item {
-            Item::Value(Value::String(_)) => Self::Version,
+            Item::Value(Value::String(version)) => Self::Version(version.value().as_str()),
             Item::Value(Value::InlineTable(fields)) => Self::Inline(fields),
             Item::Table(fields) => Self::Table(fields),
             Item::None
@@ -194,7 +194,7 @@ impl<'a> Declaration<'a> {
     const fn fields(self) -> Option<&'a dyn TableLike> {
         match self {
             Self::Inline(fields) | Self::Table(fields) => Some(fields),
-            Self::Version | Self::Other => None,
+            Self::Version(_) | Self::Other => None,
         }
     }
 }
@@ -249,6 +249,7 @@ fn lint<'a>(root: &'a Table, role: &Role) -> Vec<Violation<'a>> {
     let violations = feature_flags(root)
         .into_iter()
         .chain(dependency_form(root))
+        .chain(patch_versions(root))
         .chain(by_role)
         .collect();
 
@@ -291,7 +292,7 @@ fn dependency_form(root: &Table) -> Vec<Violation<'_>> {
         .into_iter()
         .filter(|entry| match entry.declaration {
             Declaration::Table(fields) => fields.contains_key("workspace"),
-            Declaration::Version | Declaration::Inline(_) | Declaration::Other => false,
+            Declaration::Version(_) | Declaration::Inline(_) | Declaration::Other => false,
         })
         .map(|entry| {
             Violation::at_key(
@@ -306,11 +307,55 @@ fn dependency_form(root: &Table) -> Vec<Violation<'_>> {
         .collect()
 }
 
+/// - A dependency requirement that names a patch: `0.28.0` in any form, an operator
+///   (`=0.0.360`, `>=1.2.3, <2`) or a prerelease (`1.2.3-beta.1`) included.
+/// - One or two numeric parts let patch updates flow: `0`, `0.28`, `1.2.*`, `*`.
+fn patch_versions(root: &Table) -> Vec<Violation<'_>> {
+    dependencies(root)
+        .into_iter()
+        .filter_map(|entry| {
+            let requirement = match entry.declaration {
+                Declaration::Version(requirement) => Some(requirement),
+                Declaration::Inline(fields) | Declaration::Table(fields) => {
+                    fields.get("version").and_then(Item::as_str)
+                }
+                Declaration::Other => None,
+            }?;
+            names_a_patch(requirement).then(|| {
+                let name = entry.name();
+                Violation {
+                    kind: Kind::Exemptable {
+                        rule: ManifestExemptable::PatchVersion,
+                        key: entry.key,
+                    },
+                    message: format!(
+                        "`{name}` fixes the patch version `{requirement}`; write `{name} = \"<major>\"` or `{name} = \"<major>.<minor>\"` so patch updates flow",
+                    ),
+                }
+            })
+        })
+        .collect()
+}
+
+/// Whether a requirement's first dotted run of digits has three numeric parts.
+fn names_a_patch(requirement: &str) -> bool {
+    let run: String = requirement
+        .trim_start_matches(|character: char| !character.is_ascii_digit())
+        .chars()
+        .take_while(|character| character.is_ascii_digit() || *character == '.')
+        .collect();
+    run.split('.')
+        .filter(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        .take(3)
+        .count()
+        == 3
+}
+
 fn member_versions(root: &Table) -> Vec<Violation<'_>> {
     dependencies(root)
         .into_iter()
         .filter(|entry| match entry.declaration {
-            Declaration::Version => true,
+            Declaration::Version(_) => true,
             Declaration::Inline(fields) | Declaration::Table(fields) => {
                 fields.contains_key("version")
             }
@@ -378,11 +423,13 @@ fn binary_readme<'a>(package: &Package) -> Vec<Violation<'a>> {
 /// Entries of the dependency tables at the top level and under every `[target.<platform>]`.
 fn dependencies(root: &Table) -> Vec<Entry<'_>> {
     let top_level: &dyn TableLike = root;
+    let workspace = root.get("workspace").and_then(Item::as_table_like);
     let targets = root.get("target").and_then(Item::as_table_like);
     let target_scopes = targets
         .into_iter()
         .flat_map(|targets| targets.iter().filter_map(|(_, item)| item.as_table_like()));
     std::iter::once(top_level)
+        .chain(workspace)
         .chain(target_scopes)
         .flat_map(|scope| {
             sections(scope).into_iter().flat_map(|table| {

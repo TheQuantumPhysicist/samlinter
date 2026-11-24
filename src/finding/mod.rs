@@ -43,6 +43,7 @@ pub enum Rule {
     MemberVersion,
     ModuleShape,
     PanicStrategy,
+    PatchVersion,
     PathAttr,
     RegexUse,
     RestPattern,
@@ -61,7 +62,8 @@ impl Rule {
     /// - Every rule with findings in Rust source is exempted there, by an attribute.
     /// - Comment rules also report in Cargo.toml, samlinter.toml and README files, where no
     ///   attribute can sit, so those findings stay.
-    /// - Of the manifest rules, `member_version` and `feature_flags` have an exception clause.
+    /// - Of the manifest rules, `member_version`, `patch_version` and `feature_flags`
+    ///   have an exception clause.
     /// - Syntax errors and exemption bookkeeping never are, so an exemption cannot hide itself.
     pub const fn exemptability(self) -> Exemptability {
         match self {
@@ -84,6 +86,7 @@ impl Rule {
             | Self::RestrictedVisibility
             | Self::SystemTimeNow => Exemptability::Source(SourceExemptable(self)),
             Self::MemberVersion => Exemptability::Manifest(ManifestExemptable::MemberVersion),
+            Self::PatchVersion => Exemptability::Manifest(ManifestExemptable::PatchVersion),
             Self::FeatureFlags => Exemptability::Manifest(ManifestExemptable::FeatureFlags),
             Self::BinaryReadme
             | Self::DiscardedResult
@@ -102,7 +105,7 @@ pub enum Exemptability {
     Never,
     /// By `#[cfg_attr(samlinter, expect(..))]` in Rust source.
     Source(SourceExemptable),
-    /// By `[package.metadata.samlinter.expect.<rule>]` in Cargo.toml.
+    /// By an `expect` table under a `[package|workspace].metadata.samlinter` in Cargo.toml.
     Manifest(ManifestExemptable),
 }
 
@@ -130,6 +133,7 @@ impl From<SourceExemptable> for Rule {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManifestExemptable {
     MemberVersion,
+    PatchVersion,
     FeatureFlags,
 }
 
@@ -137,6 +141,7 @@ impl From<ManifestExemptable> for Rule {
     fn from(rule: ManifestExemptable) -> Self {
         match rule {
             ManifestExemptable::MemberVersion => Self::MemberVersion,
+            ManifestExemptable::PatchVersion => Self::PatchVersion,
             ManifestExemptable::FeatureFlags => Self::FeatureFlags,
         }
     }

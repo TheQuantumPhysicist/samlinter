@@ -12,18 +12,23 @@ categories = ["development-tools"]
 include = ["/src", "/LICENSE", "/README.md"]
 
 [dependencies]
-anyhow = "1.0.104"
-cargo_metadata = "0.23.1"
+anyhow = "1.0"
+cargo_metadata = "0.23"
 ra_ap_syntax = "=0.0.360"
-regex = "1.13.1"
-serde = { version = "1.0.229", features = ["derive"] }
-strum = { version = "0.28.0", features = ["derive"] }
-toml_edit = { version = "0.25.17", features = ["serde"] }
-toml_parser = "1.1.5"
-unicode-properties = { version = "0.1.4", default-features = false, features = ["emoji"] }
+regex = "1.13"
+serde = { version = "1.0", features = ["derive"] }
+strum = { version = "0.28", features = ["derive"] }
+toml_edit = { version = "0.25", features = ["serde"] }
+toml_parser = "1.1"
+unicode-properties = { version = "0.1", default-features = false, features = ["emoji"] }
+
+# The rust-analyzer parser snapshot is locked: 0.0.x releases are incompatible with each
+# other, so the patch must stay fixed.
+[package.metadata.samlinter.expect.patch_version]
+ra_ap_syntax = "the parser snapshot must stay locked: 0.0.x releases are incompatible"
 
 [dev-dependencies]
-rstest = "0.28.0"
+rstest = "0.28"
 
 [lints.rust]
 unsafe_code = "forbid"

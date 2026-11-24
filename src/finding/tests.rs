@@ -110,6 +110,7 @@ fn exempted_in(rule: Rule) -> &'static str {
 #[case::member_version(Rule::MemberVersion, "cargo.toml")]
 #[case::module_shape(Rule::ModuleShape, "rust")]
 #[case::panic_strategy(Rule::PanicStrategy, "nowhere")]
+#[case::patch_version(Rule::PatchVersion, "cargo.toml")]
 #[case::path_attr(Rule::PathAttr, "rust")]
 #[case::regex_use(Rule::RegexUse, "rust")]
 #[case::rest_pattern(Rule::RestPattern, "rust")]
